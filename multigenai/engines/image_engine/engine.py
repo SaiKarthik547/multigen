@@ -1,12 +1,21 @@
 """
 ImageEngine — SDXL-based cinematic image generation.
 
-Migrated from MultiGenAi.py Generator class with:
+Architecture:
   - ExecutionContext injection (no global state)
-  - Typed request/response (ImageGenerationRequest → PipelineResult)
+  - Typed request/response (ImageGenerationRequest → ImageResult)
   - VRAM-aware model loading via ModelRegistry
-  - Phase 3: Two-stage SDXL refiner pipeline with VAE float32 upgrade
-  - Phase 4 hooks for IP-Adapter and ControlNet
+  - Two-stage SDXL refiner pipeline (base → latent → refiner → image)
+  - Adaptive resolution capping via BehaviourProfile
+  - OOM recovery: retry at halved resolution on OutOfMemoryError
+
+IP-Adapter / identity conditioning:
+  NOT implemented in this engine.
+  Identity embeddings are stored correctly in IdentityStore.
+  Face-conditioning via IP-Adapter or LoRA will be added in a
+  dedicated phase once a proper face-conditioning pipeline is in place.
+  Until then, identity_name on the request drives prompt-level token
+  stripping in PromptEngine only (no visual conditioning).
 """
 
 from __future__ import annotations
@@ -28,16 +37,12 @@ if TYPE_CHECKING:
 
 LOG = get_logger(__name__)
 
-_SDXL_MODEL_ID          = "stabilityai/stable-diffusion-xl-base-1.0"
-_SDXL_REFINER_MODEL_ID  = "stabilityai/stable-diffusion-xl-refiner-1.0"
-_SDXL_MIN_VRAM_GB       = 6.0
+_SDXL_MODEL_ID            = "stabilityai/stable-diffusion-xl-base-1.0"
+_SDXL_REFINER_MODEL_ID    = "stabilityai/stable-diffusion-xl-refiner-1.0"
+_SDXL_MIN_VRAM_GB         = 6.0
 # Refiner VRAM is not checked independently — base is already resident,
-# and the two run sequentially, not in parallel. Rely on runtime OOM
-# fallback (graceful refiner skip) rather than a blocking VRAM gate.
+# and the two run sequentially, not in parallel.
 _SDXL_REFINER_MIN_VRAM_GB = 0.0
-# Phase 4: IP-Adapter requires at least this much free VRAM to be safe on Kaggle / T4.
-# At <10 GB the adapter risks OOM during cross-attention patch; skip gracefully instead.
-_IP_ADAPTER_MIN_VRAM_GB = 10.0
 
 
 def _slug(s: str) -> str:
@@ -160,117 +165,40 @@ class ImageEngine:
         )
 
     # ------------------------------------------------------------------
-    # Phase 4 — IP-Adapter / Identity
+    # Phase 5+ — Stub entry points (not yet implemented)
     # ------------------------------------------------------------------
 
-    def run_with_ip_adapter(self, request: "ImageGenerationRequest", face_image_path: str) -> ImageResult:
-        """
-        [Phase 4] Identity-consistent generation via IP-Adapter.
-
-        Delegates to run() with identity_name already set on the request.
-        FaceEncoder.extract() must have been called and the embedding stored
-        in IdentityStore before calling this method.
-
-        If VRAM is insufficient, IP-Adapter is silently skipped and
-        base-only generation proceeds (graceful degradation).
-        """
-        # Ensure identity_name is forwarded; face_image_path is informational here —
-        # the embedding comes from IdentityStore (already extracted by FaceEncoder).
-        if not getattr(request, "identity_name", None):
-            LOG.warning(
-                "run_with_ip_adapter called but request.identity_name is None — "
-                "falling back to standard run()."
-            )
-        return self.run(request)
-
-    def run_with_controlnet(self, request: "ImageGenerationRequest", control_image_path: str, control_type: str = "depth") -> ImageResult:
-        """[Phase 5] ControlNet-conditioned generation."""
-        raise NotImplementedError("ControlNet conditioning activates in Phase 5.")
-
-    def _inject_identity(
+    def run_with_ip_adapter(
         self,
         request: "ImageGenerationRequest",
-        pipe,
-    ) -> bool:
+        face_image_path: str,
+    ) -> ImageResult:
         """
-        Load IP-Adapter into *pipe* and configure face-embedding conditioning.
+        [Phase 5] IP-Adapter identity conditioning — NOT YET IMPLEMENTED.
 
-        VRAM guard: if available VRAM < _IP_ADAPTER_MIN_VRAM_GB the adapter is
-        skipped and False is returned. This is the ONLY layer that enforces the
-        VRAM guard — FaceEncoder itself is CPU-only.
+        IP-Adapter integration has been intentionally deferred until a proper
+        face-conditioning pipeline (LoRA or ControlNet-based) is in place.
+        Calling this method always raises ValueError to avoid silent misuse.
 
-        Returns:
-            True  — IP-Adapter loaded, scale set, embeds attached to *pipe*.
-            False — skipped (VRAM, missing profile, or missing embedding).
+        Raises:
+            ValueError: always — use run() for standard generation.
         """
-        identity_name = getattr(request, "identity_name", None)
-        if not identity_name:
-            return False
+        raise ValueError(
+            "run_with_ip_adapter() is not implemented in this release. "
+            "IP-Adapter conditioning is deferred to a future phase. "
+            "Use ImageEngine.run() for standard SDXL generation. "
+            "Identity prompt-token stripping is still active via PromptEngine "
+            "when request.identity_name is set."
+        )
 
-        # --- VRAM guard ---
-        vram_mb = getattr(self._ctx.environment, "vram_mb", 0)
-        if vram_mb < _IP_ADAPTER_MIN_VRAM_GB * 1024:
-            LOG.warning(
-                f"⚠ Identity skipped: insufficient VRAM "
-                f"({vram_mb} MB < {_IP_ADAPTER_MIN_VRAM_GB * 1024:.0f} MB required)."
-            )
-            return False
-
-        # --- Fetch embedding via IdentityResolver (no inline store access) ---
-        from multigenai.identity.identity_resolver import IdentityResolver
-        store = self._ctx.identity_store
-        face_embedding = IdentityResolver.get_face_embedding(identity_name, store)
-
-        if face_embedding is None:
-            # IdentityResolver already logged a structured warning
-            return False
-
-        # --- Load IP-Adapter in-place on the existing pipeline ---
-        try:
-            import torch
-            strength = min(getattr(request, "identity_strength", 0.8), 1.0)  # clamp >1.0
-            pipe.load_ip_adapter(
-                "h94/IP-Adapter",
-                subfolder="sdxl_models",
-                weight_name="ip-adapter_sdxl.bin",
-            )
-            pipe.set_ip_adapter_scale(strength)
-
-            # Shape embedding: [1, 512] float16 tensor
-            embed_tensor = torch.tensor(
-                face_embedding, dtype=torch.float16
-            ).unsqueeze(0)
-            # Store embed on the pipe object for retrieval in _generate_sdxl
-            pipe._mgos_ip_embeds = embed_tensor
-
-            LOG.info(
-                f"IP-Adapter loaded for identity '{identity_name}' "
-                f"(strength={strength:.2f}, embedding_dim={len(face_embedding)})."
-            )
-            return True
-
-        except Exception as exc:
-            LOG.warning(
-                f"IP-Adapter load failed for '{identity_name}': {exc} — "
-                "falling back to base-only generation."
-            )
-            return False
-
-
-    def _unload_ip_adapter(self, pipe) -> None:
-        """
-        Unload the IP-Adapter from *pipe* and clear the stored embed tensor.
-
-        Safe to call even if IP-Adapter was never loaded — diffusers
-        pipe.unload_ip_adapter() handles that gracefully.
-        """
-        try:
-            pipe.unload_ip_adapter()
-            if hasattr(pipe, "_mgos_ip_embeds"):
-                del pipe._mgos_ip_embeds
-            LOG.debug("IP-Adapter unloaded from pipeline.")
-        except Exception as exc:
-            LOG.debug(f"_unload_ip_adapter: ignoring error during unload: {exc}")
+    def run_with_controlnet(
+        self,
+        request: "ImageGenerationRequest",
+        control_image_path: str,
+        control_type: str = "depth",
+    ) -> ImageResult:
+        """[Phase 5] ControlNet-conditioned generation — NOT YET IMPLEMENTED."""
+        raise NotImplementedError("ControlNet conditioning activates in Phase 5.")
 
     # ------------------------------------------------------------------
     # Model registration
@@ -343,17 +271,12 @@ class ImageEngine:
         except ImportError:
             pass
 
-        # Retry WITHOUT identity — request passed as None to disable IP-Adapter
-        if identity_used:
-            LOG.warning(
-                "ImageEngine: OOM with IP-Adapter active — dropping identity for retry."
-            )
         status, _ = self._generate_sdxl(
             prompt=prompt, negative_prompt=negative_prompt, out_path=out_path,
             width=retry_w, height=retry_h,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale, seed=seed,
-            request=None,  # disables IP-Adapter on retry
+            request=request,
         )
         final_status = "success" if status == "success" else "error"
         return final_status, True, False  # downgraded=True, identity_used=False
@@ -411,17 +334,9 @@ class ImageEngine:
                 environment=self._ctx.environment,
             )
 
-            # --- Phase 4: IP-Adapter identity injection (in-place, optional) ---
-            ip_kwargs: dict = {}
-            if request is not None:
-                identity_active = self._inject_identity(request, base_pipe)
-                if identity_active and hasattr(base_pipe, "_mgos_ip_embeds"):
-                    ip_kwargs["ip_adapter_image_embeds"] = [base_pipe._mgos_ip_embeds]
-
-            generator = (
-                torch.Generator(device=device).manual_seed(seed)
-                if device != "cpu" else None
-            )
+            # Bug 3 fix: always create a seeded Generator — even on CPU.
+            # Without this, CPU runs produce non-reproducible output.
+            generator = torch.Generator(device=device).manual_seed(seed)
 
             if sdxl_cfg.use_refiner:
                 # Two-stage: base produces a latent, refiner refines it
@@ -435,7 +350,6 @@ class ImageEngine:
                     output_type="latent",
                     width=width,
                     height=height,
-                    **ip_kwargs,
                 )
                 latent = base_output.images.float()
 
@@ -461,33 +375,32 @@ class ImageEngine:
                     guidance_scale=guidance_scale,
                     width=width,
                     height=height,
-                    **ip_kwargs,
                 ).images[0]
 
             image.save(str(out_path))
             LOG.info(f"Image saved: {out_path} (seed={seed})")
             return "success", identity_active
 
-        except Exception as exc:  # noqa: BLE001
-            # Narrow OOM first — must be checked before the broad except
-            try:
-                import torch as _torch
-                is_oom = isinstance(exc, _torch.cuda.OutOfMemoryError)
-            except ImportError:
-                is_oom = False
-
-            if is_oom:
+        except RuntimeError as exc:
+            # Bug 7 fix: only treat genuine OOM as 'oom'. All other RuntimeErrors
+            # are real failures and must NOT be silently swallowed.
+            if "out of memory" in str(exc).lower():
                 LOG.error(f"SDXL OOM at {width}×{height}: {exc}")
-                # Unload IP-Adapter first so caller can retry base-only
-                if identity_active and base_pipe is not None:
-                    self._unload_ip_adapter(base_pipe)
-                    LOG.info("ImageEngine: IP-Adapter unloaded before OOM retry.")
                 try:
                     self._ctx.registry.unload(_SDXL_MODEL_ID)
                 except Exception:
                     pass
                 return "oom", identity_active
+            # Non-OOM RuntimeError — propagate so it is not misdiagnosed
+            LOG.error(f"SDXL RuntimeError (not OOM): {exc}")
+            try:
+                self._ctx.registry.unload(_SDXL_MODEL_ID)
+            except Exception:
+                pass
+            return "error", identity_active
 
+        except Exception as exc:
+            # Non-RuntimeError failures (e.g. ModelNotFoundError, network errors)
             LOG.error(f"SDXL inference failed: {exc}")
             try:
                 self._ctx.registry.unload(_SDXL_MODEL_ID)

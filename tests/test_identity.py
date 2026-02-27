@@ -349,40 +349,34 @@ class TestAudioRequestIdentityFields:
 
 
 # ===========================================================================
-# 24–25: _inject_identity graceful skip paths (mocked engine)
+# 24–25: run_with_ip_adapter raises — and run() still works with identity_name
 # ===========================================================================
 
 class TestInjectIdentitySkipPaths:
+    """
+    IP-Adapter has been removed from ImageEngine.
 
-    def _make_engine(self):
+    run_with_ip_adapter() must now raise ValueError to prevent silent misuse.
+    run() with identity_name set must still succeed (prompt-level stripping only).
+    """
+
+    def test_run_with_ip_adapter_raises_value_error(self):
+        """run_with_ip_adapter() is deferred — must raise ValueError, not silently fall back."""
         from multigenai.engines.image_engine.engine import ImageEngine
         with patch.object(ImageEngine, "__init__", lambda self, ctx: None):
             engine = ImageEngine.__new__(ImageEngine)
-        env = MagicMock()
-        env.vram_mb = 0  # no VRAM — forces skip
-        ctx = MagicMock()
-        ctx.environment = env
-        engine._ctx = ctx
-        return engine
+        req = ImageGenerationRequest(prompt="hero at dawn", identity_name="hero")
+        with pytest.raises(ValueError, match="not implemented"):
+            engine.run_with_ip_adapter(req, face_image_path="face.png")
 
-    def test_inject_identity_missing_profile_returns_false(self, tmp_path):
-        """Identity name set but profile not in store → returns False, no crash."""
-        engine = self._make_engine()
-        engine._ctx.settings.output_dir = str(tmp_path)
-        req = ImageGenerationRequest(prompt="hero", identity_name="ghost")
-        result = engine._inject_identity(req, MagicMock())
-        assert result is False
-
-    def test_inject_identity_missing_embedding_returns_false(self, tmp_path):
-        """Profile exists but has no embedding → returns False, no crash."""
-        engine = self._make_engine()
-        engine._ctx.settings.output_dir = str(tmp_path)
-        store = IdentityStore(str(tmp_path))
-        store.add(CharacterProfile(character_id="blank", name="Blank"))
-        engine._ctx.environment.vram_mb = 12 * 1024
-        req = ImageGenerationRequest(prompt="hero", identity_name="blank")
-        result = engine._inject_identity(req, MagicMock())
-        assert result is False
+    def test_run_with_ip_adapter_raises_even_without_identity_name(self):
+        """ValueError is raised regardless of whether identity_name is set."""
+        from multigenai.engines.image_engine.engine import ImageEngine
+        with patch.object(ImageEngine, "__init__", lambda self, ctx: None):
+            engine = ImageEngine.__new__(ImageEngine)
+        req = ImageGenerationRequest(prompt="a landscape")
+        with pytest.raises(ValueError):
+            engine.run_with_ip_adapter(req, face_image_path=None)
 
 
 # ===========================================================================
