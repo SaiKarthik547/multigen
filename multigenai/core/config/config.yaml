@@ -1,0 +1,54 @@
+# MultiGenAI OS — Master Configuration
+# ---------------------------------------------------------------------------
+# All values here are DEFAULTS. Override by editing this file or setting
+# environment variables with prefix MGOS_ (e.g. MGOS_LOG_LEVEL=DEBUG).
+# ---------------------------------------------------------------------------
+
+mode: auto                         # dev | production | kaggle
+output_dir: multigen_outputs      # Directory for all generated outputs
+log_level: INFO                   # DEBUG | INFO | WARNING | ERROR
+log_mode: pretty                  # pretty | json
+log_file: null                    # null or a path like "logs/mgos.log"
+
+device: auto                      # auto | cuda | directml | cpu
+
+model_registry:
+  lazy_load: true                 # Load models only when first used
+  cache_dir: ~/.cache/mgos        # HuggingFace / model cache location
+
+memory:
+  backend: json                   # json | sqlite (future)
+  store_dir: multigen_outputs/.memory
+
+orchestration:
+  max_workers: 1                  # Concurrent job workers
+  job_timeout: 1800               # Per-job timeout in seconds
+
+# ---------------------------------------------------------------------------
+# LLM Intelligence Layer
+# Set enabled: true and configure a provider to activate LLM enhancement.
+# Without a provider the system falls back to rule-based logic permanently.
+# ---------------------------------------------------------------------------
+llm:
+  enabled: false                  # true | false — LLM never mandatory
+  provider: local                 # local | api
+  api_mode: gemini                # gemini | openai  (only used when provider: api)
+  model: mistral                  # Ollama model or API model ID
+  endpoint: http://localhost:11434/api/generate
+  api_key_env: MGOS_LLM_API_KEY   # Name of the env var holding the API key
+  timeout_seconds: 30             # Request timeout in seconds
+
+# ---------------------------------------------------------------------------
+# SDXL Pipeline Quality Settings
+# Override via env vars: MGOS_SDXL_USE_REFINER, MGOS_SDXL_VAE_FLOAT32, etc.
+# ---------------------------------------------------------------------------
+sdxl:
+  use_refiner: true               # Enable the two-stage refiner pass
+  base_denoising_end: 0.8         # Fraction of steps handled by base model
+  refiner_denoising_start: 0.8   # Fraction where refiner takes over
+  vae_float32: false              # false = both pipelines stay pure fp16 (no dtype mismatch)
+  num_inference_steps: 50         # Total steps (base sees 0→0.8, refiner sees 0.8→1.0)
+  guidance_scale: 7.5             # Classifier-free guidance (SDXL canonical default)
+  # Kaggle / T4 stable resolution — drops peak VRAM by ~30% vs 1024×1024
+  default_width: 768
+  default_height: 768

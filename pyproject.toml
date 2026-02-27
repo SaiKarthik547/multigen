@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multigenai"
+version = "0.1.0"
+description = "MultiGenAI OS — A Modular Multimodal Generation Operating System"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "Pillow>=10.0.0",
+    "matplotlib>=3.7.0",
+    "python-pptx>=0.6.21",
+    "python-docx>=1.0.0",
+    "wikipedia-api>=0.6.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "nltk>=3.8.0",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "torch>=2.1.0",
+    "diffusers>=0.24.0",
+    "transformers>=4.35.0",
+    "accelerate>=0.25.0",
+    "huggingface-hub>=0.20.0",
+]
+amd = [
+    "torch>=2.1.0",
+    "torch-directml>=0.2.0",
+    "diffusers>=0.24.0",
+    "transformers>=4.35.0",
+    "accelerate>=0.25.0",
+    "huggingface-hub>=0.20.0",
+]
+video = [
+    "moviepy>=1.0.3",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+mgos = "multigenai.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["multigenai*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]

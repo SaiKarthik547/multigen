@@ -1,0 +1,133 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# ─── Virtual Environments ─────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env/
+
+# ─── Distribution / Packaging ─────────────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+*.whl
+*.tar.gz
+
+# ─── Installer / pip ──────────────────────────────────────────────────────────
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ─── Testing & Coverage ───────────────────────────────────────────────────────
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+htmlcov/
+.pytest_cache/
+.hypothesis/
+nosetests.xml
+test-results/
+junit*.xml
+
+# ─── Type Checkers & Linters ──────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.ruff_cache/
+
+# ─── Jupyter Notebooks ────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ─── ML / AI Artifacts ────────────────────────────────────────────────────────
+# Model weights & checkpoints
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+*.pb
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+checkpoints/
+
+# Generated outputs (images, videos, audio)
+multigen_outputs/
+outputs/
+generated/
+*.mp4
+*.avi
+*.mov
+*.gif
+*.wav
+*.mp3
+*.flac
+
+# ─── Environment / Secrets ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.env
+secrets.yaml
+secrets.json
+config.local.yaml
+config.local.json
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+*.log.*
+
+# ─── IDEs & Editors ───────────────────────────────────────────────────────────
+# VS Code
+.vscode/
+!.vscode/extensions.json
+
+# PyCharm / JetBrains
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# ─── OS Files ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ─── Temporary / Misc ─────────────────────────────────────────────────────────
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+*.zip
+*.tar
+*.gz
+*.7z
+
+# ─── Project-Specific ─────────────────────────────────────────────────────────
+multigenai.egg-info/
+multigenai.zip

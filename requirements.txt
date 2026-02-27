@@ -1,0 +1,27 @@
+# Core ML Libraries for Stable Diffusion
+torch
+diffusers==0.24.0
+transformers==4.35.2
+accelerate==0.25.0
+huggingface-hub==0.20.3
+
+# Image, Video, and Text Processing
+Pillow
+moviepy
+nltk
+matplotlib
+
+# Document Generation
+python-pptx
+python-docx
+
+# Internet Content Sourcing
+wikipedia-api
+
+# Optional for AMD GPU on Windows
+torch-directml
+
+# Phase 4: Face embedding extraction (CPU/ONNX only — no GPU dependency)
+# Pinned: later insightface versions frequently break ABI compatibility with onnxruntime
+insightface==0.7.3
+onnxruntime==1.17.3
