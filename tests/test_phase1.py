@@ -342,6 +342,56 @@ def test_image_request_invalid_prompt():
         ImageGenerationRequest(prompt="")
 
 
+def test_video_request_phase5_defaults():
+    from multigenai.llm.schema_validator import VideoGenerationRequest
+    req = VideoGenerationRequest(prompt="a knight at dawn")
+    assert req.temporal_strength == 0.25
+    assert req.motion_hint == ""
+    assert req.num_inference_steps == 30
+    assert req.num_frames == 4
+    assert req.width == 640
+    assert req.height == 640
+
+
+def test_video_request_temporal_strength_range():
+    from multigenai.llm.schema_validator import VideoGenerationRequest
+    from pydantic import ValidationError
+    
+    # Valid explicit override
+    req = VideoGenerationRequest(prompt="test", temporal_strength=0.35)
+    assert req.temporal_strength == 0.35
+    
+    # Above max
+    with pytest.raises(ValidationError):
+        VideoGenerationRequest(prompt="test", temporal_strength=0.9)
+        
+    # Below min
+    with pytest.raises(ValidationError):
+        VideoGenerationRequest(prompt="test", temporal_strength=0.05)
+
+
+def test_latent_propagator_inject_noise_signature():
+    from multigenai.temporal.latent_propagator import LatentPropagator
+    lp = LatentPropagator()
+    assert hasattr(lp, "inject_noise")
+    assert callable(lp.inject_noise)
+
+
+def test_image_engine_run_from_previous_frame_signature(tmp_path):
+    from multigenai.engines.image_engine.engine import ImageEngine
+    from multigenai.core.execution_context import ExecutionContext
+    from multigenai.core.config.settings import get_settings
+    
+    s = get_settings()
+    s.output_dir = str(tmp_path)
+    s.memory.store_dir = str(tmp_path / ".memory")
+    ctx = ExecutionContext.build(s)
+    
+    engine = ImageEngine(ctx)
+    assert hasattr(engine, "run_from_previous_frame")
+    assert callable(engine.run_from_previous_frame)
+
+
 def test_prompt_engine_process_image(tmp_path):
     from multigenai.llm.schema_validator import ImageGenerationRequest
     from multigenai.llm.prompt_engine import PromptEngine

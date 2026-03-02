@@ -82,14 +82,27 @@ class VideoGenerationRequest(BaseModel):
     height: int = Field(default=640, ge=64, le=1080)
     seed: Optional[int] = None
     identity_threshold: float = Field(
-        default=0.85, ge=0.0, le=1.0,
-        description="Cosine similarity threshold for identity drift detection."
+        default=0.55, ge=0.0, le=1.0,
+        description="Cosine similarity threshold for identity drift enforcement (Phase 5). 0.55 = enforced; was 0.85 advisory in Phase 4."
     )
     # --- Phase 4: Identity conditioning (propagated to every frame) ---
     identity_name: Optional[str] = None
     identity_strength: float = Field(
         default=0.8, ge=0.0, le=1.5,
         description="IP-Adapter conditioning strength propagated to each frame."
+    )
+    # --- Phase 5: Temporal engine ---
+    temporal_strength: float = Field(
+        default=0.25, ge=0.10, le=0.50,
+        description="img2img strength for temporal continuity. 0.10=stable/frozen, 0.50=more motion."
+    )
+    motion_hint: str = Field(
+        default="",
+        description="Optional subtle motion suffix appended to prompt (e.g. 'subtle walking motion')."
+    )
+    num_inference_steps: int = Field(
+        default=30, ge=10, le=100,
+        description="Denoising steps per frame. 30 is the Kaggle-safe default."
     )
 
 

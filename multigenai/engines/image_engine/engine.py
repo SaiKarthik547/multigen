@@ -39,6 +39,9 @@ LOG = get_logger(__name__)
 
 _SDXL_MODEL_ID            = "stabilityai/stable-diffusion-xl-base-1.0"
 _SDXL_REFINER_MODEL_ID    = "stabilityai/stable-diffusion-xl-refiner-1.0"
+# Phase 5: base checkpoint loaded as Img2Img pipeline (separate registry key,
+# same checkpoint — no extra download). Refiner is NOT used for temporal passes.
+_SDXL_IMG2IMG_MODEL_ID    = "sdxl-base-img2img"
 _SDXL_MIN_VRAM_GB         = 6.0
 # Refiner VRAM is not checked independently — base is already resident,
 # and the two run sequentially, not in parallel.
@@ -191,6 +194,95 @@ class ImageEngine:
             "when request.identity_name is set."
         )
 
+    def run_from_previous_frame(
+        self,
+        request: "ImageGenerationRequest",
+        init_image,
+        strength: float,
+        generator,
+    ) -> "tuple[ImageResult, object]":
+        """
+        [Phase 5] Frame-conditioned img2img pass using the SDXL base checkpoint.
+
+        Drives StableDiffusionXLImg2ImgPipeline (registered as _SDXL_IMG2IMG_MODEL_ID)
+        with the SDXL base weights.  The refiner pipeline is NOT involved.
+
+        The same torch.Generator must be created once in VideoEngine and
+        passed here on every call — never re-seeded inside this method.
+
+        Args:
+            request:    ImageGenerationRequest (prompt, negative_prompt, num_inference_steps).
+            init_image: PIL.Image from the previous frame.
+            strength:   img2img noise strength (0.10–0.50).  Lower = more stable.
+            generator:  torch.Generator (shared, deterministic, never recreated).
+
+        Returns:
+            (ImageResult, PIL.Image | None).
+            On CUDA OOM returns (failed ImageResult, None) so the caller can
+            accept the previous frame without crashing.
+        """
+        import pathlib
+        from multigenai.llm.prompt_engine import PromptEngine
+
+        out_path = self._out_dir / f"{_slug(request.prompt)}_t5.png"
+        pe = PromptEngine(style_registry=self._ctx.style_registry)
+        enhanced = pe.process_image(request)
+
+        try:
+            img2img_pipe = self._ctx.registry.get(
+                _SDXL_IMG2IMG_MODEL_ID,
+                device_manager=self._ctx.device_manager,
+                environment=self._ctx.environment,
+            )
+
+            result = img2img_pipe(
+                prompt=enhanced.enhanced,
+                negative_prompt=enhanced.negative,
+                image=init_image,
+                strength=strength,
+                num_inference_steps=request.num_inference_steps,
+                guidance_scale=request.guidance_scale,
+                generator=generator,
+            )
+
+            image = result.images[0]
+            image.save(str(out_path))
+            LOG.info(f"Phase 5 frame saved: {out_path} (strength={strength:.2f})")
+
+            return (
+                ImageResult(
+                    path=str(out_path),
+                    prompt_used=enhanced.enhanced,
+                    seed=-1,   # generator is shared — no per-frame seed
+                    width=image.width,
+                    height=image.height,
+                    success=True,
+                ),
+                image,
+            )
+
+        except RuntimeError as exc:
+            if "out of memory" in str(exc).lower():
+                LOG.error(f"Phase 5 img2img OOM at strength={strength:.2f}: {exc}")
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except ImportError:
+                    pass
+                return (
+                    ImageResult(
+                        path="",
+                        prompt_used=enhanced.enhanced,
+                        seed=-1,
+                        width=request.width,
+                        height=request.height,
+                        success=False,
+                        error="CUDA OOM during img2img pass",
+                    ),
+                    None,
+                )
+            raise
+
     def run_with_controlnet(
         self,
         request: "ImageGenerationRequest",
@@ -205,7 +297,7 @@ class ImageEngine:
     # ------------------------------------------------------------------
 
     def _register_model(self) -> None:
-        """Register base and refiner loaders in the ModelRegistry (does not load yet)."""
+        """Register base, refiner, and img2img loaders in the ModelRegistry (does not load yet)."""
         ctx = self._ctx
         ctx.registry.register(
             _SDXL_MODEL_ID,
@@ -216,6 +308,11 @@ class ImageEngine:
             _SDXL_REFINER_MODEL_ID,
             loader=lambda: self._load_sdxl_refiner_pipeline(ctx.device, ctx.settings.sdxl.vae_float32),
             min_vram_gb=_SDXL_REFINER_MIN_VRAM_GB,
+        )
+        ctx.registry.register(
+            _SDXL_IMG2IMG_MODEL_ID,
+            loader=lambda: self._load_sdxl_img2img_pipeline(ctx.device),
+            min_vram_gb=_SDXL_MIN_VRAM_GB,
         )
 
     # ------------------------------------------------------------------
@@ -565,7 +662,7 @@ class ImageEngine:
 
         if device == "cuda":
             pipe.enable_model_cpu_offload()
-            pipe.enable_vae_slicing()
+            pipe.vae.enable_slicing()
             pipe.enable_attention_slicing()
             LOG.debug("SDXL base: CPU offload + VAE/attention slicing enabled.")
         else:
@@ -597,9 +694,43 @@ class ImageEngine:
 
         if device == "cuda":
             pipe.enable_model_cpu_offload()
-            pipe.enable_vae_slicing()
+            pipe.vae.enable_slicing()
             pipe.enable_attention_slicing()
             LOG.debug("SDXL refiner: CPU offload + VAE/attention slicing enabled.")
+        else:
+            pipe = pipe.to(device)
+
+        return pipe
+
+    @staticmethod
+    def _load_sdxl_img2img_pipeline(device: str):
+        """
+        Load the SDXL base checkpoint as StableDiffusionXLImg2ImgPipeline.
+
+        Phase 5 temporal passes use this pipeline — NOT the refiner.
+        Same checkpoint as the base, different pipeline class, so no extra
+        download is required after the base has been fetched once.
+        Registered under _SDXL_IMG2IMG_MODEL_ID so the registry caches it
+        separately from the base text2img pipeline.
+        """
+        import torch
+        from diffusers import StableDiffusionXLImg2ImgPipeline
+
+        torch_dtype = torch.float16 if device == "cuda" else torch.float32
+        kwargs: dict = {"torch_dtype": torch_dtype, "use_safetensors": True}
+        if torch_dtype == torch.float16:
+            kwargs["variant"] = "fp16"
+
+        LOG.info(f"Loading SDXL img2img pipeline (base checkpoint, dtype={torch_dtype})…")
+        pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+            _SDXL_MODEL_ID, **kwargs
+        )
+
+        if device == "cuda":
+            pipe.enable_model_cpu_offload()
+            pipe.vae.enable_slicing()
+            pipe.enable_attention_slicing()
+            LOG.debug("SDXL img2img: CPU offload + VAE/attention slicing enabled.")
         else:
             pipe = pipe.to(device)
 
