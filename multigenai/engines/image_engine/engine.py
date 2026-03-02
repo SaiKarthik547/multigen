@@ -311,8 +311,8 @@ class ImageEngine:
         )
         ctx.registry.register(
             _SDXL_IMG2IMG_MODEL_ID,
-            loader=lambda: self._load_sdxl_img2img_pipeline(ctx.device),
-            min_vram_gb=_SDXL_MIN_VRAM_GB,
+            loader=lambda: self._load_sdxl_img2img_pipeline_from_base(ctx),
+            min_vram_gb=0.0, # Shared components cost zero additional VRAM
         )
 
     # ------------------------------------------------------------------
@@ -617,7 +617,7 @@ class ImageEngine:
         Must only be called AFTER the full two-stage pass is complete.
         Never called between base and refiner stages.
         """
-        for model_id in (_SDXL_MODEL_ID, _SDXL_REFINER_MODEL_ID):
+        for model_id in (_SDXL_MODEL_ID, _SDXL_REFINER_MODEL_ID, _SDXL_IMG2IMG_MODEL_ID):
             try:
                 self._ctx.registry.unload(model_id)
             except Exception as exc:
@@ -644,7 +644,6 @@ class ImageEngine:
         omitted — mixed precision is handled uniformly by diffusers fp16 path.
 
         Memory optimizations active on CUDA:
-          - enable_model_cpu_offload(): moves model layers to CPU between uses
           - enable_vae_slicing():       encodes latents one slice at a time
           - enable_attention_slicing(): chunked attention computation
         These cut peak VRAM by ~30–40% with minimal quality impact.
@@ -661,10 +660,10 @@ class ImageEngine:
         pipe = DiffusionPipeline.from_pretrained(_SDXL_MODEL_ID, **kwargs)
 
         if device == "cuda":
-            pipe.enable_model_cpu_offload()
+            pipe = pipe.to(device)
             pipe.vae.enable_slicing()
             pipe.enable_attention_slicing()
-            LOG.debug("SDXL base: CPU offload + VAE/attention slicing enabled.")
+            LOG.debug("SDXL base: VAE/attention slicing enabled (offload disabled for speed).")
         else:
             pipe = pipe.to(device)
 
@@ -693,44 +692,43 @@ class ImageEngine:
         )
 
         if device == "cuda":
-            pipe.enable_model_cpu_offload()
+            pipe = pipe.to(device)
             pipe.vae.enable_slicing()
             pipe.enable_attention_slicing()
-            LOG.debug("SDXL refiner: CPU offload + VAE/attention slicing enabled.")
+            LOG.debug("SDXL refiner: VAE/attention slicing enabled (offload disabled for speed).")
         else:
             pipe = pipe.to(device)
 
         return pipe
 
     @staticmethod
-    def _load_sdxl_img2img_pipeline(device: str):
+    def _load_sdxl_img2img_pipeline_from_base(ctx: "ExecutionContext"):
         """
         Load the SDXL base checkpoint as StableDiffusionXLImg2ImgPipeline.
 
         Phase 5 temporal passes use this pipeline — NOT the refiner.
-        Same checkpoint as the base, different pipeline class, so no extra
-        download is required after the base has been fetched once.
-        Registered under _SDXL_IMG2IMG_MODEL_ID so the registry caches it
-        separately from the base text2img pipeline.
+        Shares components (**base_pipe.components) with the text2img
+        pipeline so that the massive 6GB weights are only loaded into VRAM
+        once, avoiding severe memory leaks and out-of-memory errors on Frame 1.
+        Registered under _SDXL_IMG2IMG_MODEL_ID so the registry caches it.
         """
         import torch
         from diffusers import StableDiffusionXLImg2ImgPipeline
 
-        torch_dtype = torch.float16 if device == "cuda" else torch.float32
-        kwargs: dict = {"torch_dtype": torch_dtype, "use_safetensors": True}
-        if torch_dtype == torch.float16:
-            kwargs["variant"] = "fp16"
-
-        LOG.info(f"Loading SDXL img2img pipeline (base checkpoint, dtype={torch_dtype})…")
-        pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
-            _SDXL_MODEL_ID, **kwargs
+        LOG.info("Creating SDXL img2img pipeline (sharing VRAM weights with base model)…")
+        
+        # Ensure base pipeline is loaded into memory to share components
+        base_pipe = ctx.registry.get(
+            _SDXL_MODEL_ID,
+            device_manager=ctx.device_manager,
+            environment=ctx.environment,
         )
 
+        pipe = StableDiffusionXLImg2ImgPipeline(**base_pipe.components)
+
+        device = ctx.device
         if device == "cuda":
-            pipe.enable_model_cpu_offload()
-            pipe.vae.enable_slicing()
-            pipe.enable_attention_slicing()
-            LOG.debug("SDXL img2img: CPU offload + VAE/attention slicing enabled.")
+            pipe = pipe.to(device)
         else:
             pipe = pipe.to(device)
 
