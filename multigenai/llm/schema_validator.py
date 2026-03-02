@@ -75,11 +75,11 @@ class VideoGenerationRequest(BaseModel):
     character_id: Optional[str] = None
     scene_id: Optional[str] = None
     style_id: Optional[str] = None
-    num_frames: int = Field(default=10, ge=2, le=200)
-    frame_duration: float = Field(default=1.0, ge=0.1)
-    fps: int = Field(default=24, ge=8, le=60)
-    width: int = Field(default=512, ge=64, le=1920)
-    height: int = Field(default=512, ge=64, le=1080)
+    num_frames: int = Field(default=4, ge=2, le=200)
+    frame_duration: float = Field(default=0.5, ge=0.1)
+    fps: int = Field(default=12, ge=8, le=60)
+    width: int = Field(default=640, ge=64, le=1920)
+    height: int = Field(default=640, ge=64, le=1080)
     seed: Optional[int] = None
     identity_threshold: float = Field(
         default=0.85, ge=0.0, le=1.0,
