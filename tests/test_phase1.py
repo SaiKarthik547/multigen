@@ -347,7 +347,7 @@ def test_video_request_phase5_defaults():
     req = VideoGenerationRequest(prompt="a knight at dawn")
     assert req.temporal_strength == 0.25
     assert req.motion_hint == ""
-    assert req.num_inference_steps == 30
+    assert req.num_inference_steps == 20
     assert req.num_frames == 4
     assert req.width == 640
     assert req.height == 640

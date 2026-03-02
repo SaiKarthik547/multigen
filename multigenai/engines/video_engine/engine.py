@@ -128,6 +128,29 @@ class VideoEngine:
         temporal_strength = getattr(request, "temporal_strength", 0.25)
         identity_threshold = getattr(request, "identity_threshold", 0.55)
         prev_image = None
+        
+        # --- PREVENT IDENTITY GUARD COMPUTE OVERHEAD ---
+        # Instantiating FaceEncoder is extremely expensive (ONNX load).
+        # We MUST hoist it outside the frame loop so it's loaded only once per video.
+        face_encoder = None
+        consistency_enforcer = None
+        if profile is not None and getattr(profile, "face_embedding", None):
+            try:
+                from multigenai.identity.face_encoder import FaceEncoder
+                from multigenai.control.consistency_enforcer import ConsistencyEnforcer
+                face_encoder = FaceEncoder()
+                consistency_enforcer = ConsistencyEnforcer()
+            except ImportError as exc:
+                LOG.warning(f"Identity guard skipped: insightface not available ({exc}).")
+                face_encoder = None
+                consistency_enforcer = None
+        
+        # --- PREVENT RE-LOADING BUG ---
+        # ImageEngine.run() normally auto-unloads the models at the end of the generation 
+        # if Kaggle memory profiles are active. We MUST disable this during the video 
+        # loop, otherwise Frame 0 unloads the model, forcing Frame 1 to re-load 6GB from disk.
+        original_auto_unload = self._ctx.behaviour.auto_unload_after_gen
+        self._ctx.behaviour.auto_unload_after_gen = False
 
         try:
             LOG.info(
@@ -155,18 +178,6 @@ class VideoEngine:
                     LOG.info(f"  Frame 1/{request.num_frames} done (anchor, full denoise).")
 
                 else:
-                    # --- Frame i>0: img2img conditioned on previous frame ---
-                    # Optional noise injection via LatentPropagator
-                    init_image = prev_image
-                    if generator is not None:
-                        try:
-                            from multigenai.temporal.latent_propagator import LatentPropagator
-                            init_image = LatentPropagator().inject_noise(
-                                prev_image, temporal_strength, generator
-                            )
-                        except Exception as noise_exc:
-                            LOG.debug(f"inject_noise skipped: {noise_exc}")
-
                     # Identity similarity guard (max 2 retries per frame)
                     current_strength = temporal_strength
                     attempts = 0
@@ -174,6 +185,20 @@ class VideoEngine:
                     new_image = None
 
                     while attempts < 2:
+                        # --- NOISE INJECTION (Inside loop) ---
+                        # Must be inside the retry loop so that each attempt (with 
+                        # slightly changing strength) gets a fresh noise application,
+                        # preventing endless deterministic repetition of a failed frame.
+                        init_image = prev_image
+                        if generator is not None:
+                            try:
+                                from multigenai.temporal.latent_propagator import LatentPropagator
+                                init_image = LatentPropagator().inject_noise(
+                                    prev_image, current_strength, generator
+                                )
+                            except Exception as noise_exc:
+                                LOG.debug(f"inject_noise skipped: {noise_exc}")
+                        
                         img_result, new_image = image_engine.run_from_previous_frame(
                             img_req, init_image, current_strength, generator
                         )
@@ -181,19 +206,11 @@ class VideoEngine:
                         if not img_result.success:
                             break  # OOM or other failure — accept prev_image
 
-                        # Identity guard: only runs if profile has a face embedding
-                        # and insightface is installed. Fails gracefully otherwise.
-                        if (
-                            profile is not None
-                            and getattr(profile, "face_embedding", None)
-                            and img_result.path
-                        ):
+                        # Identity guard: only runs if models successfully hoisted above
+                        if face_encoder is not None and consistency_enforcer is not None and img_result.path:
                             try:
-                                from multigenai.identity.face_encoder import FaceEncoder
-                                from multigenai.control.consistency_enforcer import ConsistencyEnforcer
-
-                                frame_emb = FaceEncoder().extract(img_result.path)
-                                similarity = ConsistencyEnforcer().check_embedding_drift(
+                                frame_emb = face_encoder.extract(img_result.path)
+                                similarity = consistency_enforcer.check_embedding_drift(
                                     frame_emb, profile.face_embedding
                                 )
                                 LOG.debug(
@@ -213,8 +230,8 @@ class VideoEngine:
                                 attempts += 1
 
                             except Exception as guard_exc:
-                                # insightface not installed, no face, or encoder failed
-                                LOG.debug(f"  Identity guard skipped: {guard_exc}")
+                                # Embedding extraction failed
+                                LOG.debug(f"  Identity extraction failed: {guard_exc}")
                                 break
                         else:
                             break  # no embedding to check → accept frame
@@ -288,6 +305,9 @@ class VideoEngine:
             LOG.error(f"Video engine error: {exc}")
             return VideoResult(path="", frame_count=0, fps=request.fps, seed=seed, success=False, error=str(exc))
         finally:
+            # Restore original memory behaviour policy
+            self._ctx.behaviour.auto_unload_after_gen = original_auto_unload
+
             for fp in frame_paths:
                 try:
                     os.remove(fp)

@@ -101,8 +101,8 @@ class VideoGenerationRequest(BaseModel):
         description="Optional subtle motion suffix appended to prompt (e.g. 'subtle walking motion')."
     )
     num_inference_steps: int = Field(
-        default=30, ge=10, le=100,
-        description="Denoising steps per frame. 30 is the Kaggle-safe default."
+        default=20, ge=10, le=100,
+        description="Denoising steps per frame. 20 is the Kaggle-optimized speed default."
     )
 
 
