@@ -68,23 +68,27 @@ class VideoEngine:
         image_engine = ImageEngine(self._ctx)
         frame_paths: List[str] = []
 
+        # Resolve identity profile once before the frame loop to avoid
+        # repeated disk IO (IdentityStore reads from disk on every call).
+        profile = None
+        if getattr(request, "identity_name", None):
+            from multigenai.memory.identity_store import IdentityStore
+            store = IdentityStore(self._ctx.settings.output_dir)
+            profile = store.get_profile(request.identity_name)
+
         try:
-            LOG.info(f"Generating {request.num_frames} frames (seed={seed})…")
+            LOG.info(f"Generating {request.num_frames} frames (seed={seed})...")
             for i in range(request.num_frames):
                 frame_prompt = f"{request.prompt}, frame {i + 1} of {request.num_frames}"
 
                 # Resolve per-frame seed: use character persistent_seed if available
                 frame_seed = seed
-                if getattr(request, "identity_name", None):
-                    from multigenai.memory.identity_store import IdentityStore
-                    _store = IdentityStore(self._ctx.settings.output_dir)
-                    _profile = _store.get_profile(request.identity_name)
-                    if (
-                        _profile is not None
-                        and request.seed is None
-                        and _profile.persistent_seed is not None
-                    ):
-                        frame_seed = _profile.persistent_seed
+                if (
+                    profile is not None
+                    and request.seed is None
+                    and profile.persistent_seed is not None
+                ):
+                    frame_seed = profile.persistent_seed
 
                 img_req = ImageGenerationRequest(
                     prompt=frame_prompt,
@@ -106,15 +110,41 @@ class VideoEngine:
                 LOG.info(f"  Frame {i + 1}/{request.num_frames} done.")
 
 
-            LOG.info(f"Stitching {len(frame_paths)} frames at {request.fps} fps…")
+            LOG.info(f"Stitching {len(frame_paths)} frames at {request.fps} fps...")
             clips = [ImageClip(fp).set_duration(request.frame_duration) for fp in frame_paths]
             video = concatenate_videoclips(clips, method="compose")
+
             video.write_videofile(
-                str(out_path), fps=request.fps, bitrate="5000k",
-                verbose=False, logger=None, codec="libx264",
+                str(out_path),
+                fps=request.fps,
+                codec="libx264",
+                audio=False,                 # CRITICAL for Kaggle
+                preset="ultrafast",          # Faster encode, less RAM
+                threads=2,
+                verbose=False,
+                logger=None,
             )
+
+            # --- IMPORTANT: Explicit cleanup ---
+            video.close()
+            for clip in clips:
+                clip.close()
+
+            del video
+            del clips
+
+            import torch
+            import gc
+            torch.cuda.empty_cache()
+            gc.collect()
+
             LOG.info(f"Video saved: {out_path}")
-            return VideoResult(path=str(out_path), frame_count=len(frame_paths), fps=request.fps, seed=seed)
+            return VideoResult(
+                path=str(out_path),
+                frame_count=len(frame_paths),
+                fps=request.fps,
+                seed=seed
+            )
 
         except EngineExecutionError:
             raise
