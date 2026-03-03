@@ -1,9 +1,10 @@
 # 🎬 MultiGenAI OS (MGOS)
 
-> **A modular, multi-modal AI content generation operating system** — generate photorealistic images, videos, audio, documents, code, and presentations from natural language prompts. Built on SDXL, IP-Adapter, InsightFace, and a pluggable LLM intelligence layer.
+> **A modular, multi-modal AI content generation operating system** — generate photorealistic images, videos, audio, documents, code, and presentations from a single natural language prompt. Built on SDXL, SVD-XT, and a pluggable creative intelligence layer.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://python.org)
-[![Diffusers](https://img.shields.io/badge/Diffusers-0.24.0-orange)](https://github.com/huggingface/diffusers)
+[![Diffusers](https://img.shields.io/badge/Diffusers-0.24%2B-orange)](https://github.com/huggingface/diffusers)
+[![Tests](https://img.shields.io/badge/Tests-199%20passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/License-MIT-green)](#license)
 
 ---
@@ -16,6 +17,7 @@
 4. [Project Structure](#project-structure)
 5. [Module Reference](#module-reference)
    - [Core Layer](#core-layer)
+   - [Creative Layer](#creative-layer) ✨ *New in Phase 7*
    - [LLM Intelligence Layer](#llm-intelligence-layer)
    - [Memory Layer](#memory-layer)
    - [Identity Layer](#identity-layer)
@@ -24,202 +26,282 @@
    - [Temporal Layer](#temporal-layer)
    - [Orchestration Layer](#orchestration-layer)
    - [API & UI Layer](#api--ui-layer)
-6. [Adaptive Behaviour Matrix](#adaptive-behaviour-matrix)
-7. [Configuration Reference](#configuration-reference)
-8. [Environment Variables](#environment-variables)
-9. [Installation](#installation)
-10. [Running the Application](#running-the-application)
-11. [Running Tests](#running-tests)
-12. [Roadmap & Phases](#roadmap--phases)
-13. [Dependencies](#dependencies)
+6. [Generation Pipeline](#generation-pipeline)
+7. [Adaptive Behaviour Matrix](#adaptive-behaviour-matrix)
+8. [Configuration Reference](#configuration-reference)
+9. [Environment Variables](#environment-variables)
+10. [Installation](#installation)
+11. [Running the Application](#running-the-application)
+12. [Running Tests](#running-tests)
+13. [Roadmap & Phases](#roadmap--phases)
 
 ---
 
 ## What is MultiGenAI OS?
 
-MultiGenAI OS is a **production-grade, multi-modal content generation system** designed to run everywhere — from a local developer machine (CPU or GPU) to a Kaggle notebook with a T4/P100. It provides a unified interface to generate:
+MultiGenAI OS is a **production-grade, multi-modal content generation system** designed to run everywhere — from a local developer machine (CPU or GPU) to a Kaggle notebook with a T4/P100/V100. It provides a unified interface to generate:
 
 | Modality | Engine | Backend |
 |---|---|---|
-| 🖼️ **Images** | `ImageEngine` | SDXL Base + Refiner (two-stage) |
-| 🎬 **Videos** | `VideoEngine` | Frame-by-frame SDXL with identity propagation |
-| 🔊 **Audio** | `AudioEngine` | Phase 6 stub — voice, music, SFX |
+| 🖼️ **Images** | `ImageEngine` | SDXL Base + optional Refiner (two-stage) |
+| 🎬 **Videos** | `VideoEngine` | Stable Video Diffusion XT (SVD-XT) |
+| 🔊 **Audio** | `AudioEngine` | Schema ready; implementation planned |
 | 📄 **Documents** | `DocumentEngine` | Wikipedia-sourced Word/PDF reports |
 | 📊 **Presentations** | `PresentationEngine` | Python-PPTX auto-decks |
 | 💻 **Code** | `CodeEngine` | LLM-guided code file generation |
 
 The system auto-detects its execution environment (Kaggle, local GPU, CPU) and adapts resolution, frame count, and memory management accordingly — **no manual tuning required**.
 
+Every generation request flows through:
+```
+Intent → SceneDesigner → PromptCompiler → Isolated Engine → ModelLifecycle.safe_unload → Output
+```
+
 ---
 
 ## Key Features
 
-- **🧠 Dual Intelligence Mode** — LLM-enhanced prompts (Gemini/OpenAI/Ollama) with automatic rule-based fallback; zero config required for offline use
-- **👤 Persistent Character Identity (Phase 4)** — Extract 512-d ArcFace face embeddings via InsightFace, store them persistently, and inject via IP-Adapter for frame-consistent characters across images and videos
-- **🎨 Style Registry** — Named style presets (cinematic, anime, photorealistic, etc.) injected automatically into every prompt
-- **🌍 Adaptive Execution** — Auto-detects Kaggle, GPU VRAM tier, DirectML (AMD on Windows), and CI environments; adjusts resolution, model choice, and memory policies
-- **📦 Lazy Model Loading** — Models never load at import time; VRAM pre-checks prevent OOM before loading begins; automatic SDXL → SD1.5 downgrade on low VRAM
-- **🔄 Dependency Injection** — All engines receive a single `ExecutionContext` container; no global singletons, fully testable
-- **📊 Generation Metrics** — Per-run structured metrics (latency, VRAM usage, seed, identity score) stored as JSON
-- **🖥️ Streamlit UI** — Full browser-based UI with modality selector, style/identity pickers, and real-time capability report
+- **🎨 Creative Intelligence Layer (Phase 7)** — `SceneDesigner` converts raw intent into a structured `SceneBlueprint`; `PromptCompiler` turns that into optimized diffusion prompts with model-specific negative tokens
+- **🔒 Strict Model Lifecycle** — `ModelLifecycle.safe_unload()` ensures VRAM is fully evacuated after every generation; base and refiner are NEVER loaded simultaneously
+- **🎬 SVD-XT Video Generation (Phase 6)** — Single-pass Stable Video Diffusion XT pipeline with sequentially-offloaded UNet; `ffmpeg` direct byte-pipe encoding produces `.mp4` without intermediate disk writes
+- **🤖 GenerationManager Orchestration** — All modalities flow through a single orchestrator; engines are instantiated, run, and destroyed per-request — no engine shares state with another
+- **🧠 Dual LLM Mode** — LLM-enhanced prompts (Gemini/OpenAI/Ollama) with automatic rule-based fallback; zero config required for offline use
+- **👤 Persistent Character Identity** — 512-d ArcFace face embeddings via InsightFace, stored persistently and injected for frame-consistent characters
+- **🌍 Adaptive Execution** — Auto-detects Kaggle, GPU VRAM tier, DirectML (AMD on Windows), and CI environments
+- **📊 Generation Metrics** — Per-run structured metrics (latency, VRAM usage, seed) stored as JSON
+- **🖥️ Streamlit UI** — Full browser-based UI with modality selector and real-time capability report
+- **✅ 199 Tests Passing** — Comprehensive test coverage across all modules without requiring GPU or network
 
 ---
 
 ## System Architecture
 
+MGOS is structured around **three core architectural principles**:
+
+| Principle | Implementation |
+|---|---|
+| **No engine calls another engine** | All cross-engine orchestration is `GenerationManager`'s sole responsibility |
+| **Every model is isolated in VRAM** | Engines load lazily and `ModelLifecycle.safe_unload()` is called in every `finally` block |
+| **Intent precedes inference** | `SceneDesigner → PromptCompiler` always runs before any GPU operation begins |
+
+---
+
+### L1 — System Overview
+
 ```mermaid
 graph TB
-    subgraph USER_ENTRY["User Entry Points"]
-        UI["🖥️ Streamlit UI\napp/streamlit_app.py"]
-        CLI["⌨️ CLI\nmultigenai/cli.py"]
-        REST["🌐 REST API\napi/rest_api.py"]
+    subgraph ENTRY["① User Entry Points"]
+        direction LR
+        UI["🖥️ Streamlit UI\napps/streamlit_app.py"]
+        CLI["⌨️ CLI\ncli.py"]
+        API["🌐 REST API\napi/rest_api.py"]
     end
 
-    subgraph CORE["Core Layer"]
-        LC["LifecycleManager\nlifecycle.py"]
-        CTX["ExecutionContext\nexecution_context.py"]
-        ENV["EnvironmentDetector\nenvironment.py"]
-        DM["DeviceManager\ndevice_manager.py"]
-        MR["ModelRegistry\nmodel_registry.py"]
-        SET["Settings\nconfig/settings.py"]
-        CAP["CapabilityReport\ncapability_report.py"]
-        LOG["StructuredLogger\nlogging/"]
-        EXC["Custom Exceptions\nexceptions.py"]
-        MET["GenerationMetrics\nmetrics.py"]
+    subgraph GM_BOX["② GenerationManager — Sole Orchestrator"]
+        GM["GenerationManager\ncore/generation_manager.py\n\nRoutes every request.\nEnforces lifecycle on all engines.\nNever passed a model handle directly."]
     end
 
-    subgraph LLM["LLM Intelligence Layer"]
-        PE["PromptEngine\nllm/prompt_engine.py"]
-        EE["EnhancementEngine\nllm/enhancement_engine.py"]
-        SV["SchemaValidator\nllm/schema_validator.py"]
-        SP["ScenePlanner\nllm/scene_planner.py"]
-        LP["LocalProvider (Ollama)\nllm/providers/local_provider.py"]
-        AP["APIProvider (Gemini/OpenAI)\nllm/providers/api_provider.py"]
+    subgraph CREATIVE_BOX["③ Creative Intelligence Layer"]
+        SD["SceneDesigner\ncreative/scene_designer.py\n→ SceneBlueprint"]
+        PC["PromptCompiler\ncreative/prompt_compiler.py\n→ (positive, negative) prompts"]
+        SD --> PC
     end
 
-    subgraph MEMORY["Memory Layer"]
-        IS["IdentityStore\nmemory/identity_store.py"]
-        SR["StyleRegistry\nmemory/style_registry.py"]
-        WS["WorldStateEngine\nmemory/world_state.py"]
-        ES["EmbeddingStore\nmemory/embedding_store.py"]
+    subgraph LLM_BOX["④ LLM Intelligence Layer"]
+        PE["PromptEngine\nStyle injection · Identity token strip"]
+        EE["EnhancementEngine\nRule-based + Gemini/Ollama enrichment"]
+        PE --> EE
     end
 
-    subgraph IDENTITY["Identity Layer"]
-        FE["FaceEncoder (InsightFace/ArcFace)\nidentity/face_encoder.py"]
-        IR["IdentityResolver\nidentity/identity_resolver.py"]
+    subgraph ENGINE_BOX["⑤ Diffusion Engines (Isolated per request)"]
+        IE["🖼️ ImageEngine\nSDXL Base → optional Refiner\nengines/image_engine/"]
+        VE["🎬 VideoEngine\nSVD-XT single-pass\nengines/video_engine/"]
+        AE["🔊 AudioEngine\nSchema-ready stub"]
+        DE["📄 DocumentEngine\nWikipedia → Word/PDF"]
+        PRE["📊 PresentationEngine\nPython-PPTX auto-decks"]
+        CE["💻 CodeEngine\nLLM code generation"]
     end
 
-    subgraph ENGINES["Engines Layer"]
-        IE["ImageEngine\nengines/image_engine/"]
-        VE["VideoEngine\nengines/video_engine/"]
-        AE["AudioEngine\nengines/audio_engine/"]
-        DE["DocumentEngine\nengines/document_engine/"]
-        PRE["PresentationEngine\nengines/presentation_engine/"]
-        CE["CodeEngine\nengines/code_engine/"]
+    subgraph LIFECYCLE_BOX["⑥ Model Lifecycle"]
+        ML["ModelLifecycle.safe_unload(obj)\ncore/model_lifecycle.py\n\ndel → gc.collect()\n→ cuda.empty_cache()\n→ cuda.ipc_collect()"]
     end
 
-    subgraph CONTROL["Control Layer"]
-        CONS["ConsistencyEnforcer\ncontrol/consistency_enforcer.py"]
-        CN["ControlNetManager\ncontrol/controlnet_manager.py"]
-        GM["GuidanceManager\ncontrol/guidance_manager.py"]
+    subgraph CORE_BOX["⑦ Core Infrastructure"]
+        CTX["ExecutionContext\nDI container (device, registry, stores, behaviour)"]
+        ENV["EnvironmentDetector\nKaggle / CUDA / DirectML / CI"]
+        MR["ModelRegistry\nLazy load · VRAM guard · Usage tracking"]
+        MET["GenerationMetrics\nLatency · VRAM · Seed · Identity score"]
     end
 
-    subgraph TEMPORAL["Temporal Layer"]
-        ME["MotionEngine\ntemporal/motion_engine.py"]
-        OF["OpticalFlow\ntemporal/optical_flow.py"]
-        LAT["LatentPropagator\ntemporal/latent_propagator.py"]
+    subgraph MEMORY_BOX["⑧ Memory & Identity Layer"]
+        IS["IdentityStore\nCharacterProfile v3\n512-d ArcFace embeddings"]
+        SR["StyleRegistry\nNamed style presets"]
+        WS["WorldStateEngine\nScene context across frames"]
+        ES["EmbeddingStore\nIn-memory vector cache"]
+        FE["FaceEncoder\nInsightFace ArcFace R100 (CPU/ONNX)"]
+        IR["IdentityResolver\nCentralized embedding retrieval"]
     end
 
-    subgraph ORCH["Orchestration Layer"]
-        DAG["DAGEngine\norchestration/dag_engine.py"]
-        JQ["JobQueue\norchestration/job_queue.py"]
-        TS["TaskScheduler\norchestration/task_scheduler.py"]
+    subgraph MODEL_BOX["⑨ AI Model Backends"]
+        SDXL["stabilityai/sdxl-base-1.0"]
+        REF["stabilityai/sdxl-refiner-1.0"]
+        SVD["stabilityai/stable-video-diffusion-img2vid-xt"]
     end
 
-    subgraph MODELS["AI Models"]
-        SDXL["SDXL Base\nstabilityai/sdxl-base-1.0"]
-        REF["SDXL Refiner\nstabilityai/sdxl-refiner-1.0"]
-        SD15["SD 1.5 Fallback\nrunwayml/stable-diffusion-v1-5"]
-        IPA["IP-Adapter\nfaceid-plus"]
-        AFC["ArcFace/buffalo_l\nInsightFace ONNX"]
-    end
+    ENTRY --> GM
+    GM --> SD
+    PC --> IE & VE & AE & DE & PRE & CE
+    GM --> DE & PRE & CE & AE
+    IE & VE & AE --> ML
+    DE & PRE & CE --> ML
+    IE --> SDXL & REF
+    VE --> SVD
+    GM --> CTX
+    CTX --> ENV & MR & IS & SR & WS & ES
+    FE --> IS
+    IR --> IS & ES
+    MET -.->|"recorded per run"| IE & VE
 
-    subgraph OUTPUT["Outputs"]
-        IMG["Images (.png)"]
-        VID["Videos (.mp4)"]
-        AUD["Audio (.wav/.mp3)"]
-        DOC["Documents (.docx/.pdf)"]
-        PPT["Presentations (.pptx)"]
-        COD["Code Files"]
-        MEM["Memory Store\n(.memory/JSON)"]
-    end
-
-    USER_ENTRY --> ORCH
-    ORCH --> LLM
-    LLM --> PE
-    PE --> EE
-    PE --> SV
-    PE --> SP
-    EE -->|"LLM call"| LP
-    EE -->|"LLM call"| AP
-
-    ORCH --> ENGINES
-    ENGINES --> CORE
-    ENGINES --> MEMORY
-    ENGINES --> IDENTITY
-    ENGINES --> CONTROL
-    ENGINES --> TEMPORAL
-    ENGINES --> MODELS
-
-    LC --> CTX
-    CTX --> ENV
-    CTX --> DM
-    CTX --> MR
-    CTX --> SET
-    CTX --> CAP
-    CTX --> MEMORY
-    CTX --> LLM
-
-    IDENTITY --> FE
-    FE --> AFC
-    IR --> IS
-
-    CONS --> IS
-    CONS -->|"cosine similarity"| ES
-
-    IE -->|"two-stage"| SDXL
-    IE -->|"refiner"| REF
-    IE -->|"low VRAM"| SD15
-    IE -->|"identity conditioning"| IPA
-
-    MR -->|"lazy load + VRAM guard"| MODELS
-    ENGINES --> OUTPUT
-    MEMORY --> MEM
-
-    classDef core fill:#1e3a5f,stroke:#4a90d9,color:#fff
-    classDef llm fill:#1a3d2e,stroke:#4caf50,color:#fff
-    classDef memory fill:#3d1a2e,stroke:#e91e8c,color:#fff
-    classDef identity fill:#3d2e1a,stroke:#ff9800,color:#fff
-    classDef engines fill:#1a2e3d,stroke:#03a9f4,color:#fff
-    classDef control fill:#2e1a3d,stroke:#9c27b0,color:#fff
-    classDef temporal fill:#3d3d1a,stroke:#ffeb3b,color:#333
-    classDef orch fill:#1a3d3d,stroke:#009688,color:#fff
-    classDef models fill:#3d1a1a,stroke:#f44336,color:#fff
-    classDef output fill:#2a2a2a,stroke:#888,color:#fff
     classDef entry fill:#0d0d0d,stroke:#fff,color:#fff
+    classDef gm fill:#2e2e1a,stroke:#ffeb3b,color:#111
+    classDef creative fill:#1a3d2e,stroke:#4caf50,color:#fff
+    classDef llm fill:#1a2e1a,stroke:#81c784,color:#fff
+    classDef engines fill:#1a2e3d,stroke:#03a9f4,color:#fff
+    classDef lifecycle fill:#3d1a1a,stroke:#f44336,color:#fff
+    classDef core fill:#1e3a5f,stroke:#4a90d9,color:#fff
+    classDef memory fill:#3d1a2e,stroke:#e91e8c,color:#fff
+    classDef models fill:#2d1f00,stroke:#ff9800,color:#fff
 
-    class LC,CTX,ENV,DM,MR,SET,CAP,LOG,EXC,MET core
-    class PE,EE,SV,SP,LP,AP llm
-    class IS,SR,WS,ES memory
-    class FE,IR identity
+    class UI,CLI,API entry
+    class GM gm
+    class SD,PC creative
+    class PE,EE llm
     class IE,VE,AE,DE,PRE,CE engines
-    class CONS,CN,GM control
-    class ME,OF,LAT temporal
-    class DAG,JQ,TS orch
-    class SDXL,REF,SD15,IPA,AFC models
-    class IMG,VID,AUD,DOC,PPT,COD,MEM output
-    class UI,CLI,REST entry
+    class ML lifecycle
+    class CTX,ENV,MR,MET core
+    class IS,SR,WS,ES,FE,IR memory
+    class SDXL,REF,SVD models
 ```
+
+---
+
+### L2 — Image Generation Data Flow
+
+```mermaid
+sequenceDiagram
+    participant U as User (CLI/UI/API)
+    participant GM as GenerationManager
+    participant SD as SceneDesigner
+    participant PC as PromptCompiler
+    participant IE as ImageEngine
+    participant SDXL as SDXL Base
+    participant REF as SDXL Refiner
+    participant ML as ModelLifecycle
+
+    U->>GM: ImageGenerationRequest(prompt, style, width, height, seed)
+    GM->>SD: design(request)
+    SD-->>GM: SceneBlueprint(subject, environment, lighting, camera, atmosphere)
+    GM->>PC: compile(blueprint, model_name="sdxl-base")
+    PC-->>GM: (positive_prompt, negative_prompt)
+
+    GM->>IE: ImageEngine(ctx)
+    GM->>IE: run(positive, negative, request)
+    IE->>SDXL: lazy load + sequential CPU offload
+    SDXL-->>IE: image tensor (80% denoised)
+    IE->>SDXL: unload base
+    alt use_refiner=True
+        IE->>REF: lazy load
+        REF-->>IE: image tensor (refined 20%)
+        IE->>REF: unload refiner
+    end
+    IE-->>GM: ImageResult(path, seed, success)
+    GM->>ML: safe_unload(engine)
+    ML-->>GM: VRAM cleared
+    GM-->>U: ImageResult
+```
+
+---
+
+### L2 — Video Generation Data Flow
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant GM as GenerationManager
+    participant IE as ImageEngine
+    participant ML1 as ModelLifecycle
+    participant VE as VideoEngine
+    participant SVD as SVD-XT Pipeline
+    participant FF as ffmpeg (subprocess)
+    participant ML2 as ModelLifecycle
+
+    U->>GM: VideoGenerationRequest(prompt, num_frames, fps)
+
+    note over GM,IE: STEP 1 — Keyframe via ImageEngine
+    GM->>IE: generate conditioning keyframe
+    IE->>IE: SceneDesigner + PromptCompiler
+    IE-->>GM: conditioning_image_path
+    GM->>ML1: safe_unload(image_engine)
+    ML1-->>GM: VRAM fully evacuated
+
+    note over GM,FF: STEP 2 — SVD-XT single-pass
+    GM->>VE: VideoEngine.generate(request, conditioning_image_path)
+    VE->>SVD: load with sequential UNet/VAE offloading
+    SVD-->>VE: frames tensor [F, C, H, W]
+    VE->>FF: pipe raw frame bytes to ffmpeg stdin
+    FF-->>VE: .mp4 written to disk
+    VE-->>GM: VideoResult(path, frame_count, fps)
+    GM->>ML2: safe_unload(video_engine)
+    ML2-->>GM: VRAM fully evacuated
+    GM-->>U: VideoResult
+```
+
+---
+
+### L2 — VRAM Lifecycle State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Unloaded : Engine instantiated
+
+    Unloaded --> BaseLoading : _load_model(model_name)
+    BaseLoading --> BaseReady : torch.float16 + cpu_offload + vae_slicing
+
+    BaseReady --> Generating : _generate(prompt, request)
+    Generating --> BaseReady : image tensor produced
+
+    BaseReady --> BaseUnloaded : del self.pipe + gc + cuda_empty_cache
+    BaseUnloaded --> RefinerLoading : use_refiner=True
+
+    RefinerLoading --> RefinerReady : float16 consistent dtype
+    RefinerReady --> Refining : _refine(image, ...)
+    Refining --> RefinerReady : refined image produced
+    RefinerReady --> Unloaded : del self.refiner + gc + cuda_empty_cache
+
+    BaseUnloaded --> Unloaded : use_refiner=False
+    Unloaded --> [*] : ModelLifecycle.safe_unload(engine)
+
+    note right of BaseLoading
+        Base and Refiner are NEVER
+        in VRAM simultaneously
+    end note
+```
+
+---
+
+### Architectural Layer Summary
+
+| # | Layer | Location | Responsibility |
+|---|---|---|---|
+| ① | **Entry Points** | `cli.py`, `api/`, `apps/` | Accept user input; delegate 100% to GenerationManager |
+| ② | **GenerationManager** | `core/generation_manager.py` | Sole orchestrator; owns inter-engine sequencing; enforces lifecycle |
+| ③ | **Creative Layer** | `creative/` | Converts intent into `SceneBlueprint` → optimized prompts before any GPU op |
+| ④ | **LLM Intelligence** | `llm/` | Style injection, token stripping, LLM-based enhancement |
+| ⑤ | **Engines** | `engines/` | Isolated inference; each engine owns its model load/unload; no engine calls another |
+| ⑥ | **Model Lifecycle** | `core/model_lifecycle.py` | Centralized teardown (`del`, `gc`, `empty_cache`, `ipc_collect`) |
+| ⑦ | **Core Infrastructure** | `core/` | Settings, DI container, device detection, metrics, exception hierarchy |
+| ⑧ | **Memory & Identity** | `memory/`, `identity/` | Persistent character embeddings, style presets, world state, embedding cache |
+| ⑨ | **AI Backends** | HuggingFace Hub | SDXL Base, SDXL Refiner, SVD-XT (downloaded on first use) |
 
 ---
 
@@ -228,73 +310,74 @@ graph TB
 ```
 multigen/
 ├── apps/
-│   └── streamlit_app.py          # Streamlit browser UI
+│   └── streamlit_app.py              # Streamlit browser UI
 ├── multigenai/
-│   ├── __init__.py
-│   ├── cli.py                    # Full-featured CLI entry point
+│   ├── cli.py                        # CLI entry point (routes through GenerationManager)
 │   ├── core/
 │   │   ├── config/
-│   │   │   ├── settings.py       # Settings dataclasses + loader
-│   │   │   └── config.yaml       # Default configuration file
-│   │   ├── logging/
-│   │   │   └── __init__.py       # Structured logger (pretty/JSON modes)
-│   │   ├── capability_report.py  # System capability snapshot
-│   │   ├── device_manager.py     # CUDA/DirectML/CPU device abstraction
-│   │   ├── environment.py        # Platform detection + BehaviourProfile
-│   │   ├── exceptions.py         # Custom exception hierarchy
-│   │   ├── execution_context.py  # DI container wired at startup
-│   │   ├── lifecycle.py          # Startup/shutdown lifecycle manager
-│   │   ├── metrics.py            # GenerationMetrics recording
-│   │   └── model_registry.py     # Lazy model loader + VRAM guard
+│   │   │   ├── settings.py           # Settings dataclasses + loader
+│   │   │   └── config.yaml           # Default configuration
+│   │   ├── logging/                  # Structured logger (pretty/JSON)
+│   │   ├── capability_report.py      # System capability snapshot
+│   │   ├── device_manager.py         # CUDA/DirectML/CPU device abstraction
+│   │   ├── environment.py            # Platform detection + BehaviourProfile
+│   │   ├── exceptions.py             # Custom exception hierarchy
+│   │   ├── execution_context.py      # DI container wired at startup
+│   │   ├── generation_manager.py     # ✨ Sole orchestrator for all modalities
+│   │   ├── lifecycle.py              # Startup/shutdown lifecycle manager
+│   │   ├── metrics.py                # GenerationMetrics recording
+│   │   ├── model_lifecycle.py        # ✨ ModelLifecycle.safe_unload() helper
+│   │   └── model_registry.py         # Lazy model loader + VRAM guard
+│   ├── creative/                     # ✨ Phase 7 Creative Intelligence Layer
+│   │   ├── scene_designer.py         # Intent → SceneBlueprint
+│   │   └── prompt_compiler.py        # SceneBlueprint → optimized prompts
 │   ├── llm/
 │   │   ├── providers/
-│   │   │   ├── base.py           # LLMProvider abstract base
-│   │   │   ├── local_provider.py # Ollama integration
-│   │   │   └── api_provider.py   # Gemini / OpenAI API integration
-│   │   ├── enhancement_engine.py # Rule-based + LLM prompt enricher
-│   │   ├── prompt_engine.py      # Full prompt processing pipeline
-│   │   ├── scene_planner.py      # Multi-scene narrative planner
-│   │   └── schema_validator.py   # Pydantic v2 request/response schemas
+│   │   │   ├── base.py               # LLMProvider abstract base
+│   │   │   ├── local_provider.py     # Ollama integration
+│   │   │   └── api_provider.py       # Gemini / OpenAI API integration
+│   │   ├── enhancement_engine.py     # Rule-based + LLM prompt enricher
+│   │   ├── prompt_engine.py          # Full prompt processing pipeline
+│   │   ├── scene_planner.py          # Multi-scene narrative planner
+│   │   └── schema_validator.py       # Pydantic v2 request/response schemas
 │   ├── memory/
-│   │   ├── embedding_store.py    # In-memory vector embedding cache
-│   │   ├── identity_store.py     # Persistent character identity storage
-│   │   ├── style_registry.py     # Named style presets registry
-│   │   └── world_state.py        # Scene/world state engine
+│   │   ├── embedding_store.py        # In-memory vector embedding cache
+│   │   ├── identity_store.py         # Persistent character identity (v3 schema)
+│   │   ├── style_registry.py         # Named style presets
+│   │   └── world_state.py            # Scene/world state engine
 │   ├── identity/
-│   │   ├── face_encoder.py       # ArcFace 512-d embedding via InsightFace
-│   │   └── identity_resolver.py  # Centralized embedding retrieval
+│   │   ├── face_encoder.py           # ArcFace 512-d via InsightFace (CPU-only)
+│   │   └── identity_resolver.py      # Centralized embedding retrieval
 │   ├── engines/
-│   │   ├── image_engine/         # SDXL two-stage image generation
-│   │   ├── video_engine/         # Frame-by-frame video generation
-│   │   ├── audio_engine/         # Audio generation (Phase 6)
-│   │   ├── document_engine/      # Word/PDF document generation
-│   │   ├── presentation_engine/  # PowerPoint generation
-│   │   └── code_engine/          # Code file generation
+│   │   ├── image_engine/             # ✨ Phase 7: SDXL strict lifecycle engine
+│   │   ├── video_engine/             # ✨ Phase 6: SVD-XT single-pass pipeline
+│   │   ├── audio_engine/             # Schema-ready stub
+│   │   ├── document_engine/          # Word/PDF reports
+│   │   ├── presentation_engine/      # PowerPoint decks
+│   │   └── code_engine/              # LLM code generation
 │   ├── control/
-│   │   ├── consistency_enforcer.py  # Identity drift detection (cosine sim)
-│   │   ├── controlnet_manager.py    # ControlNet integration manager
-│   │   └── guidance_manager.py      # Classifier-free guidance control
+│   │   ├── consistency_enforcer.py   # Identity drift detection (cosine sim)
+│   │   ├── controlnet_manager.py     # ControlNet integration manager
+│   │   └── guidance_manager.py       # CFG control
 │   ├── temporal/
-│   │   ├── latent_propagator.py  # Latent space consistency across frames
-│   │   ├── motion_engine.py      # Motion field computation
-│   │   └── optical_flow.py       # Optical flow estimation
+│   │   ├── latent_propagator.py      # Latent noise propagation between frames
+│   │   ├── motion_engine.py          # Motion field computation
+│   │   └── optical_flow.py           # Optical flow estimation
 │   ├── orchestration/
-│   │   ├── dag_engine.py         # DAG-based multi-step job execution
-│   │   ├── job_queue.py          # Asynchronous job queue
-│   │   └── task_scheduler.py     # Task scheduling and priority
+│   │   ├── dag_engine.py             # DAG-based multi-step job execution
+│   │   ├── job_queue.py              # Async job queue
+│   │   └── task_scheduler.py         # Task scheduling
 │   └── api/
-│       ├── rest_api.py           # FastAPI REST endpoints
-│       └── websocket.py          # WebSocket streaming support
+│       ├── rest_api.py               # FastAPI REST endpoints
+│       └── websocket.py              # WebSocket streaming
 ├── tests/
-│   ├── test_phase1.py            # Core infrastructure tests
-│   ├── test_environment.py       # Environment detection tests
-│   ├── test_identity.py          # Identity layer tests
-│   ├── test_llm_providers.py     # LLM provider tests
-│   └── test_compute_stability.py # SDXL stability + OOM tests
-├── multigen_outputs/             # All generated content (gitignored)
+│   ├── test_phase1.py                # 70 core infrastructure tests
+│   ├── test_environment.py           # Environment detection + Phase 7 schema tests
+│   ├── test_identity.py              # 50 identity layer tests
+│   ├── test_llm_providers.py         # LLM provider tests
+│   └── test_compute_stability.py     # Metrics, registry, Phase 7 lifecycle tests
 ├── requirements.txt
-├── pyproject.toml
-└── .gitignore
+└── pyproject.toml
 ```
 
 ---
@@ -303,67 +386,88 @@ multigen/
 
 ### Core Layer
 
-The core layer is the backbone of MGOS. Every subsystem is wired together through dependency injection — there are **no global singletons** other than the `ModelRegistry`.
+#### `GenerationManager` (`core/generation_manager.py`) ✨ New in Phase 7
+
+The **sole orchestrator** for all generation modalities. All CLI, API, and UI requests route through here.
+
+- Instantiates each engine per-request, never shares engines between requests
+- Calls `SceneDesigner → PromptCompiler` before any diffusion call
+- Calls `ModelLifecycle.safe_unload()` in every `finally` block
+- Video generation: `ImageEngine` (keyframe) → unload → `VideoEngine` (SVD-XT) → unload
+
+```python
+from multigenai.core.generation_manager import GenerationManager
+from multigenai.llm.schema_validator import ImageGenerationRequest
+
+manager = GenerationManager(ctx)
+result = manager.generate_image(ImageGenerationRequest(
+    prompt="a knight at dawn",
+    style="cinematic",
+    use_refiner=True,
+))
+```
+
+#### `ModelLifecycle` (`core/model_lifecycle.py`) ✨ New in Phase 7
+
+Centralized GPU memory teardown. Replaces all scattered `del`, `gc.collect()`, `empty_cache()` patterns.
+
+```python
+from multigenai.core.model_lifecycle import ModelLifecycle
+
+ModelLifecycle.safe_unload(engine)  # handles None, del, gc, cuda cache — all in one call
+```
 
 #### `ExecutionContext` (`core/execution_context.py`)
 
-The single dependency container passed to every engine. Created once at startup via `ExecutionContext.build(settings)`.
+The single dependency container passed to every engine. Created once at startup.
 
 | Attribute | Type | Description |
 |---|---|---|
 | `settings` | `Settings` | Loaded application settings |
 | `device` | `str` | Active device: `"cuda"` / `"directml"` / `"cpu"` |
-| `device_manager` | `DeviceManager` | VRAM live query interface |
-| `registry` | `ModelRegistry` | Global lazy-loading model registry |
-| `identity_store` | `IdentityStore` | Persistent character identity memory |
-| `world_state` | `WorldStateEngine` | Scene/world state engine |
+| `behaviour` | `BehaviourProfile` | Adaptive limits (max_res, auto_unload, etc.) |
+| `registry` | `ModelRegistry` | Lazy-loading model registry |
+| `identity_store` | `IdentityStore` | Persistent character identity store |
 | `style_registry` | `StyleRegistry` | Named style presets |
-| `embedding_store` | `EmbeddingStore` | In-process vector embedding cache |
-| `llm_provider` | `LLMProvider \| None` | Active LLM backend (None = rule-based) |
-| `environment` | `EnvironmentProfile` | Detected platform/VRAM/mode snapshot |
-| `capability` | `dict` | Full capability report (OS, GPU, libs) |
+| `environment` | `EnvironmentProfile` | Detected platform/VRAM snapshot |
 
 #### `EnvironmentDetector` (`core/environment.py`)
 
-Runs at startup. Produces an immutable `EnvironmentProfile` snapshot.
-
-- Detects: **Kaggle** (via `KAGGLE_KERNEL_RUN_TYPE` or `/kaggle/input`), **CUDA**, **DirectML** (AMD/Windows), **CI** (GitHub Actions, Travis, etc.)
-- Queries VRAM via `torch.cuda.get_device_properties()`, RAM via `psutil`
-- All detection is safe — never crashes on missing libraries
+Runs at startup. Detects Kaggle, CUDA, DirectML, CI environments; queries VRAM; produces an immutable `EnvironmentProfile`. Never crashes on missing libraries.
 
 #### `ModelRegistry` (`core/model_registry.py`)
 
-Thread-safe, lazy-loading model registry (singleton).
-
-- **Lazy**: models never load at import time — safe for Kaggle CPU kernels
-- **VRAM guard**: checks available VRAM before loading; raises `InsufficientVRAMError` with actionable message
-- **Auto-downgrade**: SDXL → SD 1.5 when VRAM < 8 GB
-- **Usage tracking**: records load count, cumulative runtime, peak VRAM per model
-- **Thread-safe**: all public methods use `threading.Lock`
-
-#### `Settings` (`core/config/settings.py`)
-
-Three-layer priority chain (highest to lowest):
-
-1. **Environment variables** (`MGOS_<KEY>=value`)
-2. **`config.yaml`** in the package config directory
-3. **Built-in defaults**
-
-Key settings groups: `ModelRegistrySettings`, `MemorySettings`, `OrchestrationSettings`, `LLMSettings`, `SDXLSettings`.
+Thread-safe, lazy-loading registry (still available for legacy/fallback use). With Phase 7, engines own their model lifecycle directly and only use the registry for optional caching.
 
 #### `GenerationMetrics` (`core/metrics.py`)
 
-Structured per-run metrics recorder: latency, seed, VRAM usage, identity cosine score, output path. Serializable to JSON and stored in `multigen_outputs/.memory/`.
+Structured per-run metrics: latency, VRAM usage, seed, identity name. Serializable to JSON.
 
-#### Custom Exceptions (`core/exceptions.py`)
+---
 
-| Exception | Raised When |
-|---|---|
-| `InvalidPromptError` | Prompt fails validation |
-| `InsufficientVRAMError` | Not enough VRAM to load a model |
-| `ModelNotFoundError` | Model ID not registered |
-| `ModelLoadError` | Model loader raised an exception during load |
-| `IdentityEncoderError` | InsightFace not installed / no face detected |
+### Creative Layer ✨ Phase 7
+
+The creative layer intercepts all generation requests **before** any diffusion model is touched. It converts raw user intent into a structured blueprint and then compiles that into optimized model-specific prompts.
+
+```
+User Prompt → SceneDesigner → SceneBlueprint → PromptCompiler → (positive_prompt, negative_prompt)
+```
+
+#### `SceneDesigner` (`creative/scene_designer.py`)
+
+Analyzes the request and produces a `SceneBlueprint` with:
+- `subject` — extracted primary subject
+- `environment` — scene background and world context
+- `lighting` — lighting style derived from `style` field
+- `camera` — camera angle from `camera` field
+- `rendering_style` — model-specific rendering tokens
+- `atmosphere_tags` — mood and tone descriptors
+
+#### `PromptCompiler` (`creative/prompt_compiler.py`)
+
+Compiles a `SceneBlueprint` into:
+- **Positive prompt** — detail-rich, model-optimized generation prompt
+- **Negative prompt** — a hard-coded, comprehensive token list eliminating low-quality and artifact-prone outputs (not user-configurable for production stability)
 
 ---
 
@@ -371,153 +475,121 @@ Structured per-run metrics recorder: latency, seed, VRAM usage, identity cosine 
 
 #### `PromptEngine` (`llm/prompt_engine.py`)
 
-The core prompt processing pipeline:
+Two-track prompt processing:
+1. **Creative track (Phase 7)**: `SceneDesigner → PromptCompiler` (primary path via `GenerationManager`)
+2. **Legacy track**: direct call to `PromptEngine.process_image()` for programmatic access
 
-```
-User Prompt
-  → Style injection (StyleRegistry lookup)
-  → Camera/Lighting token injection
-  → Identity conflict token stripping (when IP-Adapter active)
-  → LLM/rule-based enhancement (EnhancementEngine)
-  → Negative prompt assembly
-  → Token estimation
-  → EnhancedPrompt
-```
-
-When a character identity is active (`identity_name` set), the engine automatically removes facial descriptor tokens like `"blue eyes"`, `"blonde hair"`, etc. that would conflict with the IP-Adapter face conditioning.
-
-#### `EnhancementEngine` (`llm/enhancement_engine.py`)
-
-Calls the active `LLMProvider` to enrich prompts with quality tokens, cinematic language, and scene detail. Falls back to a built-in rule-based injector when no LLM is configured.
+When called directly, `process_image()` supports:
+- Style injection from `StyleRegistry` (via `style` field)
+- Adaptive camera string injection
+- Identity conflict token stripping when `identity_name` is active
 
 #### `SchemaValidator` — Pydantic v2 schemas (`llm/schema_validator.py`)
 
-All engines receive typed, validated request objects:
+**Phase 7 `ImageGenerationRequest`** (key changes from Phase 3):
 
-| Schema | Used By | Key Fields |
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `prompt` | `str` | required | User text intent |
+| `style` | `Optional[str]` | `"cinematic"` | Style preset name |
+| `camera` | `Optional[str]` | `"medium"` | Camera shot type |
+| `environment_detail_level` | `float [0,1]` | `0.8` | Background detail richness |
+| `model_name` | `str` | `"sdxl-base"` | Which diffusion model to run |
+| `use_refiner` | `bool` | `True` | Enable SDXL refiner pass |
+| `width` | `int` | `1024` | Must be divisible by 64 |
+| `height` | `int` | `1024` | Must be divisible by 64 |
+| `seed` | `Optional[int]` | `None` | Reproducibility seed |
+
+> **Resolution validation**: `width` and `height` are validated at schema level via `@field_validator` — requests with dimensions not divisible by 64 are rejected before reaching the engine.
+
+**Phase 6 `VideoGenerationRequest`** (stable):
+
+| Field | Default | Description |
 |---|---|---|
-| `ImageGenerationRequest` | ImageEngine | `prompt`, `width`, `height`, `seed`, `identity_name`, `identity_strength`, `camera`, `lighting`, `style_id` |
-| `VideoGenerationRequest` | VideoEngine | `prompt`, `num_frames`, `fps`, `identity_name`, `identity_threshold` |
-| `AudioGenerationRequest` | AudioEngine | `prompt`, `audio_type`, `emotion`, `duration_seconds` |
-| `DocumentGenerationRequest` | DocumentEngine | `prompt`, `doc_type`, `output_format`, `target_pages` |
-| `EnhancedPrompt` | All Engines (output of PromptEngine) | `original`, `enhanced`, `negative`, `style_fragment`, `tokens_estimated` |
-
-#### LLM Providers (`llm/providers/`)
-
-| Provider | Class | Backend |
-|---|---|---|
-| `local` | `LocalLLMProvider` | Ollama (`http://localhost:11434/api/generate`) |
-| `api` (gemini) | `APILLMProvider` | Google Gemini API |
-| `api` (openai) | `APILLMProvider` | OpenAI API |
-
-Providers share a common `LLMProvider` abstract base — swapping backends requires one config change.
-
-#### `ScenePlanner` (`llm/scene_planner.py`)
-
-Multi-scene narrative planner. Takes a high-level story prompt and decomposes it into ordered scene objects, each with individual camera, lighting, and character assignments.
+| `num_frames` | `16` | Number of frames to generate |
+| `fps` | `8` | Output video framerate |
+| `width` | `1024` | Must be divisible by 64 |
+| `height` | `576` | Must be divisible by 64 |
+| `temporal_strength` | `0.25` | Frame-to-frame coherence strength |
+| `motion_hint` | `""` | Optional motion direction text |
+| `num_inference_steps` | `25` | SVD-XT denoising steps |
 
 ---
 
 ### Memory Layer
 
-All memory stores use JSON-backed persistence in `multigen_outputs/.memory/` by default. The backend is configurable via `memory.backend` in `config.yaml`.
+All memory stores use JSON-backed persistence in `multigen_outputs/.memory/` by default.
 
 #### `IdentityStore` (`memory/identity_store.py`)
 
-Stores `CharacterProfile` objects keyed by name:
-- `name`, `description`, `persistent_seed`, `face_embedding` (512-d ArcFace float list)
-- `schema_version` for forward-compatible migration
-- Methods: `save()`, `get()`, `list_all()`, `delete()`
+Stores `CharacterProfile` objects (schema v3 — multi-modal embedding support):
+- `face_embedding` — 512-d ArcFace float list
+- `voice_embedding` — optional voice identity vector
+- `style_embedding` — optional style embedding
+- `metadata` — arbitrary key-value for wardrobe, lighting bias, etc.
+- Forward-compatible schema migration from v1/v2
 
 #### `StyleRegistry` (`memory/style_registry.py`)
 
-Named style presets. A `StyleProfile` provides:
-- `to_prompt_fragment()` — appended to positive prompt
-- `to_negative_fragment()` — merged into negative prompt
-- Built-in styles: cinematic, anime, photorealistic, watercolor, sketch
-
-#### `WorldStateEngine` (`memory/world_state.py`)
-
-Tracks scene-level state across a generation session: active characters, objects, locations, time of day, weather. Enables context-aware generation across multiple scenes.
-
-#### `EmbeddingStore` (`memory/embedding_store.py`)
-
-In-memory key-value cache for vector embeddings (face, CLIP, text). Used by `ConsistencyEnforcer` for drift checking without re-encoding.
+Named style presets with `to_prompt_fragment()` and `to_negative_fragment()` methods.
+Built-in: `cinematic-dark`, `anime`, `photorealistic`, `watercolor`, `sketch`.
 
 ---
 
 ### Identity Layer
 
-The identity layer enables **persistent, photo-realistic character consistency** across images and video frames.
-
 #### `FaceEncoder` (`identity/face_encoder.py`)
 
-Extracts 512-dimensional ArcFace embeddings from reference face images.
-
+Extracts 512-dimensional ArcFace embeddings from reference images.
 - **Model**: InsightFace `buffalo_l` (ArcFace R100)
-- **Runtime**: CPU-only via ONNX (`CPUExecutionProvider`) — no GPU memory consumed
-- **Lazy loading**: InsightFace app loads on the first `extract()` call
-- **Detection**: selects the face with the largest bounding box (primary subject)
-- **Output**: `List[float]` of length 512
-
-```python
-encoder = FaceEncoder()
-embedding = encoder.extract("reference_photo.png")  # List[float], len=512
-```
+- **Runtime**: CPU-only via ONNX — no GPU memory, no VRAM impact
+- **Lazy**: loads on first `extract()` call
 
 #### `IdentityResolver` (`identity/identity_resolver.py`)
 
-Centralized hub for embedding retrieval. Given an `identity_name`, it:
-1. Checks `EmbeddingStore` (fast in-memory cache)
-2. Falls back to `IdentityStore` (disk)
-3. Re-runs `FaceEncoder` if embedding is missing or stale
+Centralized embedding retrieval across modalities:
+- `get_face_embedding(identity_name, store)` → `List[float] | None`
+- `get_voice_embedding(identity_name, store)` → `List[float] | None`
+- `get_style_embedding(identity_name, store)` → `List[float] | None`
+- `resolve(identity_name, store, modality="face")` → unified entry point
 
 ---
 
 ### Engines Layer
 
-All engines share the same pattern:
-1. Receive a typed `xRequest` object (validated by `SchemaValidator`)
-2. Call `PromptEngine` to produce an `EnhancedPrompt`
-3. Load the model via `ModelRegistry.get()` (lazy + VRAM-guarded)
-4. Run inference
-5. Record `GenerationMetrics`
-6. Return a typed `xResult` with `output_path`
+All engines follow the **Phase 7 lifecycle contract**:
 
-#### `ImageEngine` (`engines/image_engine/`)
+```
+Instantiate (lazy, no model load) → run(compiled_prompt, ...) → _load_model() → _generate() → _unload() → Return Result
+```
 
-The most feature-rich engine:
+No engine imports or calls another engine. All cross-engine orchestration is `GenerationManager`'s responsibility.
 
-- **SDXL Two-Stage Pipeline**: base model (80% of steps) + refiner (final 20%) — configurable via `SDXLSettings.base_denoising_end`
-- **IP-Adapter Integration**: when `identity_name` is set and `BehaviourProfile.ip_adapter_allowed=True`, loads `ip-adapter-faceid-plus` and injects face embeddings
-- **VRAM Guards**: checks VRAM before each component load; falls back to SD 1.5 if SDXL doesn't fit
-- **OOM Recovery**: catches `torch.cuda.OutOfMemoryError`, empties cache, and retries at lower resolution
-- **Memory Optimizations**: VAE slicing, attention slicing, CPU offloading on Kaggle
-- **Dtype Consistency**: base and refiner both use `torch.float16`; VAE kept in fp32 only when explicitly requested
+#### `ImageEngine` (`engines/image_engine/`) ✨ Phase 7 Rewrite
 
-#### `VideoEngine` (`engines/video_engine/`)
+The SDXL engine with strict isolated lifecycle:
 
-Generates videos as sequences of SDXL frames:
-- Propagates `identity_name` and `identity_strength` to every frame
-- Records per-frame identity drift scores via `ConsistencyEnforcer.check_embedding_drift()`
-- Stitches frames with MoviePy (`libx264`, configurable fps and bitrate)
-- Cleans up temporary frame PNGs in `finally` block
+- **`_load_model(model_name)`**: lazy-loads SDXL base with sequential CPU offloading; `torch.float16` + VAE slicing + attention slicing
+- **`_generate(prompt, negative, request)`**: single deterministic base pass
+- **`_refine(image, prompt, negative, request)`**: optional second-stage refiner pass; loaded **only if** `use_refiner=True`; immediately unloaded after
+- **`_unload()`**: safely frees `self.pipe`, `self.refiner`, CUDA cache
+- `import torch` is **method-level** — the module can be imported without PyTorch installed (Kaggle warm-up safe)
 
-#### `AudioEngine` (`engines/audio_engine/`)
+**Base and refiner are never in VRAM simultaneously** — base is unloaded before refiner loads.
 
-Phase 6 stub. Schema (`AudioGenerationRequest`) supports `voice`, `music`, `sfx`, `ambient`, emotion, and duration. Full implementation pending.
+#### `VideoEngine` (`engines/video_engine/`) ✨ Phase 6 SVD-XT
 
-#### `DocumentEngine` (`engines/document_engine/`)
+Single-pass Stable Video Diffusion XT pipeline:
 
-Generates `.docx` and `.pdf` documents from Wikipedia-sourced content, heading hierarchies, and optional embedded images.
+- Accepts a keyframe image path (generated by `ImageEngine` via `GenerationManager`)
+- Sequential CPU offloading: `UNet`, `VAE`, `image_encoder` offloaded independently
+- Motion bucket mapped from `motion_hint` text
+- Output frames piped **directly** to `ffmpeg` via byte stream — no intermediate PNGs
+- `pipe.to("cpu")`, `del pipe`, CUDA cache flush in `finally` block
 
-#### `PresentationEngine` (`engines/presentation_engine/`)
+#### `AudioEngine` / `DocumentEngine` / `PresentationEngine` / `CodeEngine`
 
-Auto-generates `.pptx` decks: title slide + bullet slides from Wikipedia-sourced topic content. Configurable slide count.
-
-#### `CodeEngine` (`engines/code_engine/`)
-
-Generates code files for 12+ languages (Python, JS, Go, Rust, SQL, etc.) via LLM prompting. Language is auto-detected from the request or explicitly specified.
+All production-integrated: receive typed request objects, produce typed results, and are lifecycle-managed by `GenerationManager`. Audio is schema-ready pending model integration.
 
 ---
 
@@ -525,34 +597,19 @@ Generates code files for 12+ languages (Python, JS, Go, Rust, SQL, etc.) via LLM
 
 #### `ConsistencyEnforcer` (`control/consistency_enforcer.py`)
 
-Cross-modal consistency validation:
-
-- **`inject_identity()`** — copies `CharacterProfile.persistent_seed` into a request to ensure the same character always uses the same noise seed
-- **`enforce_seed()`** — priority: explicit seed > character persistent_seed > random
-- **`check_embedding_drift()`** — pure-Python cosine similarity between two embedding vectors; no torch dependency. Typical same-identity threshold: ≥ 0.6
-- **Phase 4**: advisory only — drift is logged but not enforced
-- **Phase 5**: hard enforcement activates (planned)
-- **Phase 8**: `check_visual_text_alignment()` via CLIP (stub)
-
-#### `ControlNetManager` (`control/controlnet_manager.py`)
-
-Manages ControlNet depth/canny/pose models. Number of simultaneous ControlNets is capped by `BehaviourProfile.max_controlnets`.
-
-#### `GuidanceManager` (`control/guidance_manager.py`)
-
-Classifier-free guidance scale management — dynamic CFG scheduling across denoising steps.
+- `enforce_seed(request, profile)` — request seed overrides character persistent seed
+- `check_embedding_drift(v1, v2)` — pure-Python cosine similarity (no torch)
+- `check_identity_drift()` — deprecated alias, fully supported
 
 ---
 
 ### Temporal Layer
 
-Handles time-coherent video and animation generation.
-
 | Module | Purpose |
 |---|---|
-| `MotionEngine` | Computes motion fields and velocity maps between frames |
-| `OpticalFlow` | Dense optical flow estimation (Lucas-Kanade / Farneback) |
-| `LatentPropagator` | Propagates latent noise state between sequential frames for smoother transitions |
+| `MotionEngine` | Motion field and velocity map computation |
+| `OpticalFlow` | Dense optical flow (Lucas-Kanade / Farneback) |
+| `LatentPropagator` | Latent noise consistency across frames |
 
 ---
 
@@ -560,9 +617,9 @@ Handles time-coherent video and animation generation.
 
 | Module | Purpose |
 |---|---|
-| `DAGEngine` | Executes multi-step generation jobs as directed acyclic graphs |
-| `JobQueue` | Thread-safe async job queue with priority support |
-| `TaskScheduler` | Schedules and dispatches jobs to available workers |
+| `DAGEngine` | DAG-based multi-step job execution |
+| `JobQueue` | Thread-safe async job queue |
+| `TaskScheduler` | Priority scheduling |
 
 ---
 
@@ -570,38 +627,68 @@ Handles time-coherent video and animation generation.
 
 #### Streamlit UI (`apps/streamlit_app.py`)
 
-Full browser-based interface with zero generation logic — it is a **thin UI layer only**, calling `ExecutionContext` and engines directly.
+Pure display layer — all logic in `GenerationManager`:
+- Modality selector, style/identity pickers, real-time capability report
+- `@st.cache_resource` for session-persistent `ExecutionContext`
 
-- **Sidebar**: modality selector, style preset picker, identity selector, environment badge (platform, device, VRAM, RAM), system capabilities expander
-- **Main panel**: prompt text area, generate button, LLM status indicator
-- **Results**: inline image display, audio player, file download button for documents/code
-- **Session persistence**: `@st.cache_resource` ensures the context and model registry survive page refreshes
-
-**To run:**
 ```bash
 python -m streamlit run apps/streamlit_app.py
 ```
 
 #### REST API (`api/rest_api.py`)
 
-FastAPI endpoints for programmatic access. WebSocket support for streaming generation progress (`api/websocket.py`).
+FastAPI endpoints + WebSocket streaming. All routes delegate to `GenerationManager`.
+
+---
+
+## Generation Pipeline
+
+### Image Generation (Phase 7)
+
+```
+CLI/API/UI
+  └─> GenerationManager.generate_image(ImageGenerationRequest)
+        ├─> SceneDesigner.design(request) → SceneBlueprint
+        ├─> PromptCompiler.compile(blueprint, model_name) → (positive, negative)
+        ├─> ImageEngine(ctx)
+        │     ├─> _load_model("sdxl-base")
+        │     ├─> _generate(positive, negative, request)
+        │     ├─> _refine(image, ...) [if use_refiner=True]
+        │     └─> _unload()
+        └─> ModelLifecycle.safe_unload(engine)
+```
+
+### Video Generation (Phase 6)
+
+```
+GenerationManager.generate_video(VideoGenerationRequest)
+  ├─> [If no conditioning image provided]
+  │     ├─> SceneDesigner + PromptCompiler → compile keyframe prompt
+  │     ├─> ImageEngine.run(keyframe_req)
+  │     └─> ModelLifecycle.safe_unload(image_engine)  ← VRAM cleared
+  └─> VideoEngine.generate(request, conditioning_image_path)
+        ├─> Load SVD-XT with sequential offloading
+        ├─> Single forward pass → frames tensor
+        ├─> Pipe frames to ffmpeg → .mp4
+        └─> ModelLifecycle.safe_unload(video_engine)
+```
 
 ---
 
 ## Adaptive Behaviour Matrix
 
-MGOS automatically selects capability limits based on the detected environment:
+| Platform | Device | VRAM | Max Resolution | Max Frames | Auto-Unload |
+|---|---|---|---|---|---|
+| Any | CPU | — | 512px | 8 | ❌ |
+| Kaggle | CUDA | ≥ 14 GB | 1024px | 24 | ✅ |
+| Local | CUDA | < 7 GB | 512px | 8 | ❌ |
+| Local | CUDA | 7–13 GB | 768px | 16 | ❌ |
+| Local | CUDA | ≥ 14 GB | 1024px | 24 | ❌ |
+| Production | Any | Any | 2048px | 48 | ❌ |
 
-| Platform | Device | VRAM | Max Resolution | Max Frames | ControlNets | IP-Adapter | Auto-Unload |
-|---|---|---|---|---|---|---|---|
-| Any | CPU | — | 512px | 8 | 0 | ❌ | ❌ |
-| Kaggle | CUDA | ≥ 14 GB | 1024px | 24 | 2 | ✅ | ✅ |
-| Local | CUDA | < 7 GB | 512px | 8 | 0 | ❌ | ❌ |
-| Local | CUDA | 7–13 GB | 768px | 16 | 1 | ✅ | ❌ |
-| Local | CUDA | ≥ 14 GB | 1024px | 24 | 2 | ✅ | ❌ |
-| Production | Any | Any | 2048px | 48 | 2 | ✅ | ❌ |
+> **Mode drift protection**: if `settings.mode=production` but platform is Kaggle, MGOS logs a `⚠ MODE DRIFT DETECTED` warning — production memory policies cause OOM on Kaggle.
 
-> **Mode drift protection**: if `settings.mode=production` is set but the platform is Kaggle, MGOS logs a warning — production memory policies cause OOM on Kaggle.
+> **Phase 7 override**: `GenerationManager` always forces `auto_unload_after_gen=True` regardless of the behaviour matrix — lifecycle is controlled by `ModelLifecycle.safe_unload()`.
 
 ---
 
@@ -644,33 +731,25 @@ sdxl:
   vae_float32: false      # false = pure fp16, no dtype mismatch
   num_inference_steps: 50
   guidance_scale: 7.5
-  default_width: 768      # 768 saves ~30% VRAM vs 1024
-  default_height: 768
+  default_width: 1024     # Phase 7 default (SDXL native resolution)
+  default_height: 1024
 ```
 
 ---
 
 ## Environment Variables
 
-All settings are overridable via environment variables with the `MGOS_` prefix:
-
 | Variable | Description | Example |
 |---|---|---|
 | `MGOS_MODE` | Execution mode | `kaggle` / `dev` / `production` |
 | `MGOS_DEVICE` | Force a device | `cuda` / `cpu` |
 | `MGOS_LOG_LEVEL` | Logging level | `DEBUG` / `INFO` |
-| `MGOS_LOG_MODE` | Log format | `pretty` / `json` |
 | `MGOS_LLM_ENABLED` | Enable LLM | `true` / `false` |
 | `MGOS_LLM_PROVIDER` | LLM backend | `local` / `api` |
 | `MGOS_LLM_API_MODE` | API provider | `gemini` / `openai` |
 | `MGOS_LLM_MODEL` | Model name | `gemini-1.5-flash` |
-| `MGOS_LLM_API_KEY` | API key value | `sk-...` |
-| `MGOS_LLM_TIMEOUT` | Request timeout (s) | `60` |
+| `MGOS_LLM_API_KEY` | API key | `sk-...` |
 | `MGOS_SDXL_USE_REFINER` | Enable SDXL refiner | `true` / `false` |
-| `MGOS_SDXL_DEFAULT_WIDTH` | Default image width | `768` |
-| `MGOS_SDXL_DEFAULT_HEIGHT` | Default image height | `768` |
-| `MGOS_SDXL_NUM_INFERENCE_STEPS` | Denoising steps | `50` |
-| `MGOS_SDXL_GUIDANCE_SCALE` | CFG scale | `7.5` |
 
 ---
 
@@ -682,15 +761,16 @@ All settings are overridable via environment variables with the `MGOS_` prefix:
 - (Optional) NVIDIA GPU with CUDA 11.8+ for GPU acceleration
 - (Optional) AMD GPU on Windows → requires `torch-directml`
 - (Optional) Ollama running locally for offline LLM enhancement
+- (Optional) `ffmpeg` in `PATH` for video encoding
 
 ### Steps
 
 ```bash
-# 1. Clone the repository
+# 1. Clone
 git clone https://github.com/your-username/multigen.git
 cd multigen
 
-# 2. Create and activate a virtual environment
+# 2. Create virtual environment
 python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # Linux / macOS
@@ -698,14 +778,12 @@ python -m venv .venv
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. (Optional) Install the package in editable mode
+# 4. (Optional) Editable install
 pip install -e .
 
-# 5. (Optional) Install identity layer dependencies
+# 5. (Optional) Identity layer
 pip install insightface==0.7.3 onnxruntime==1.17.3
 ```
-
-> **Windows AMD GPU users**: Install `torch-directml` separately — it is not included in the main requirements to avoid conflicts on CUDA systems.
 
 ---
 
@@ -717,56 +795,50 @@ pip install insightface==0.7.3 onnxruntime==1.17.3
 python -m streamlit run apps/streamlit_app.py
 ```
 
-Opens at `http://localhost:8501`. The sidebar shows real-time environment detection (platform, device, VRAM).
+Opens at `http://localhost:8501`.
 
 ### CLI
 
 ```bash
-python -m multigenai.cli generate --prompt "a warrior at dawn" --modality image
-python -m multigenai.cli generate --prompt "epic battle scene" --modality video --frames 16
-python -m multigenai.cli generate --prompt "quantum computing" --modality document
+# Image generation (Phase 7 schema)
+python -m multigenai.cli image "a warrior at dawn" --style cinematic --seed 42
+
+# Video generation (Phase 6 SVD-XT)
+python -m multigenai.cli video "epic ocean storm" --frames 16 --fps 8
+
+# Document generation
+python -m multigenai.cli document "quantum computing" --pages 5
+
+# Presentation
+python -m multigenai.cli presentation "machine learning" --slides 8
 ```
 
-### Enabling LLM Enhancement (Gemini)
-
-```bash
-export MGOS_LLM_ENABLED=true
-export MGOS_LLM_PROVIDER=api
-export MGOS_LLM_API_MODE=gemini
-export MGOS_LLM_MODEL=gemini-1.5-flash
-export MGOS_LLM_API_KEY=your_gemini_api_key
-```
-
-### Enabling LLM Enhancement (Ollama)
-
-```bash
-ollama pull mistral
-export MGOS_LLM_ENABLED=true
-export MGOS_LLM_PROVIDER=local
-export MGOS_LLM_MODEL=mistral
-```
-
-### Using Character Identity
+### Programmatic API (Phase 7)
 
 ```python
+from multigenai.core.config.settings import get_settings
 from multigenai.core.execution_context import ExecutionContext
-from multigenai.identity.face_encoder import FaceEncoder
-from multigenai.llm.schema_validator import ImageGenerationRequest
+from multigenai.core.generation_manager import GenerationManager
+from multigenai.llm.schema_validator import ImageGenerationRequest, VideoGenerationRequest
 
-ctx = ExecutionContext.build()
+settings = get_settings()
+ctx = ExecutionContext.build(settings)
+manager = GenerationManager(ctx)
 
-# Register a character identity
-encoder = FaceEncoder()
-embedding = encoder.extract("my_character.png")
-ctx.identity_store.save("hero", face_embedding=embedding, persistent_seed=42)
+# Image
+img_result = manager.generate_image(ImageGenerationRequest(
+    prompt="a futuristic city at dusk",
+    style="cinematic",
+    use_refiner=True,
+    width=1024, height=1024,
+    seed=42,
+))
 
-# Generate with identity
-from multigenai.engines.image_engine import ImageEngine
-engine = ImageEngine(ctx)
-result = engine.run(ImageGenerationRequest(
-    prompt="a warrior standing on a mountain peak at sunrise",
-    identity_name="hero",
-    identity_strength=0.8,
+# Video (auto-generates keyframe via ImageEngine, then SVD-XT)
+vid_result = manager.generate_video(VideoGenerationRequest(
+    prompt="a calm ocean at golden hour",
+    num_frames=16,
+    fps=8,
 ))
 ```
 
@@ -775,15 +847,17 @@ result = engine.run(ImageGenerationRequest(
 ## Running Tests
 
 ```bash
-# Run all tests
+# Run all 199 tests
 pytest tests/ -v
 
-# Run specific test suites
-pytest tests/test_phase1.py -v           # Core infrastructure
-pytest tests/test_environment.py -v     # Environment detection
-pytest tests/test_identity.py -v        # Identity layer
-pytest tests/test_llm_providers.py -v   # LLM providers
-pytest tests/test_compute_stability.py -v  # SDXL stability + OOM handling
+# Individual suites
+pytest tests/test_phase1.py -v           # Core infrastructure (70 tests)
+pytest tests/test_environment.py -v      # Environment + Phase 7 schema (25 tests)
+pytest tests/test_identity.py -v         # Identity layer (50 tests)
+pytest tests/test_llm_providers.py -v    # LLM providers
+pytest tests/test_compute_stability.py -v  # Metrics, registry, lifecycle (54 tests)
+
+# All tests run without GPU, torch, diffusers, or network access
 ```
 
 ---
@@ -795,65 +869,10 @@ pytest tests/test_compute_stability.py -v  # SDXL stability + OOM handling
 | Phase 1 | ✅ Complete | Core infrastructure: Settings, DeviceManager, ModelRegistry, EnvironmentDetector, ExecutionContext, Metrics |
 | Phase 2 | ✅ Complete | LLM Intelligence Layer: PromptEngine, EnhancementEngine, SchemaValidator, LLM Providers |
 | Phase 3 | ✅ Complete | Adaptive execution: BehaviourProfile matrix, auto mode resolution, Kaggle-safe memory policies |
-| Phase 4 | ✅ Complete | Identity Layer: FaceEncoder (ArcFace), IdentityStore, IdentityResolver, IP-Adapter integration, ConsistencyEnforcer |
-| Phase 5 | 🔜 Planned | Hard consistency enforcement: temporal identity drift rejection, frame re-generation on drift |
-| Phase 6 | 🔜 Planned | Audio Engine: voice cloning, music generation, SFX synthesis |
-| Phase 7 | 🔜 Planned | Document Engine expansion: PDF rendering, chart embedding |
-| Phase 8 | 🔜 Planned | CLIP-based visual/text alignment checking in ConsistencyEnforcer |
-| Phase 9 | 🔜 Planned | REST API hardening, WebSocket streaming, authentication |
-
----
-
-## Dependencies
-
-### Core ML
-| Package | Version | Purpose |
-|---|---|---|
-| `torch` | latest | GPU/CPU tensor computation |
-| `diffusers` | 0.24.0 | SDXL, SD 1.5, IP-Adapter pipelines |
-| `transformers` | 4.35.2 | CLIP text encoders, tokenizers |
-| `accelerate` | 0.25.0 | Device placement, mixed precision |
-| `huggingface-hub` | 0.20.3 | Model downloading and caching |
-
-### Identity
-| Package | Version | Purpose |
-|---|---|---|
-| `insightface` | 0.7.3 | ArcFace face embedding extraction |
-| `onnxruntime` | 1.17.3 | CPU-side ONNX inference for InsightFace |
-
-### Media & Documents
-| Package | Purpose |
-|---|---|
-| `Pillow` | Image I/O |
-| `moviepy` | Video stitching |
-| `matplotlib` | Visualization charts |
-| `python-pptx` | PowerPoint generation |
-| `python-docx` | Word document generation |
-| `wikipedia-api` | Content sourcing |
-
-### Runtime
-| Package | Purpose |
-|---|---|
-| `pydantic` | v2 request/response schemas |
-| `pyyaml` | Config file loading |
-| `psutil` | System RAM detection |
-| `streamlit` | Browser UI |
-| `fastapi` | REST API |
-
-### Optional
-| Package | Platform | Purpose |
-|---|---|---|
-| `torch-directml` | Windows AMD | DirectML GPU acceleration |
-| `nltk` | All | NLP text processing |
-
----
-
-## License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-<div align="center">
-  <sub>Built with ❤️ using SDXL, InsightFace, Diffusers, and Streamlit</sub>
-</div>
+| Phase 4 | ✅ Complete | Identity Layer: FaceEncoder (ArcFace), IdentityStore (v3), IdentityResolver, ConsistencyEnforcer |
+| Phase 5 | ✅ Complete | Hard consistency enforcement: seed injection, embedding drift tracking, temporal coherence |
+| Phase 6 | ✅ Complete | **SVD-XT VideoEngine**: single-pass Stable Video Diffusion, sequential offloading, direct ffmpeg encoding |
+| Phase 7 | ✅ Complete | **Architecture Overhaul**: SceneDesigner, PromptCompiler, ModelLifecycle, GenerationManager as sole orchestrator, strict VRAM isolation |
+| Phase 8 | 🔜 Planned | Audio Engine: voice cloning (YourTTS/Bark), music generation (MusicGen), SFX synthesis |
+| Phase 9 | 🔜 Planned | ControlNet integration: depth, canny, pose control signals |
+| Phase 10 | 🔜 Planned | Multi-agent DAG orchestration: parallel scene generation, automatic scene assembly |

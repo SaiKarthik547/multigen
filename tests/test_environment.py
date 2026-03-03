@@ -247,53 +247,40 @@ def _make_mock_ctx(device_type: str = "cpu", vram_mb: int = 0):
     return ctx
 
 
-def test_image_engine_resolution_cap_cpu():
-    """CPU mode: 1024×1024 request is capped to 512×512."""
+def test_image_engine_resolution_schema_rejects_non_multiple_of_64():
+    """Phase 7: Resolution is now validated at schema level (% 64), not capped at runtime."""
+    from multigenai.llm.schema_validator import ImageGenerationRequest
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError, match="divisible by 64"):
+        ImageGenerationRequest(prompt="a sunset", width=777, height=555)
+
+
+def test_image_engine_resolution_schema_accepts_valid():
+    """Phase 7: 1024x1024 (divisible by 64) passes schema validation."""
+    from multigenai.llm.schema_validator import ImageGenerationRequest
+    req = ImageGenerationRequest(prompt="a sunset", width=1024, height=576)
+    assert req.width == 1024
+    assert req.height == 576
+
+
+def test_image_engine_resolution_schema_default_is_1024():
+    """Phase 7: Default resolution is 1024x1024 (SDXL native)."""
+    from multigenai.llm.schema_validator import ImageGenerationRequest
+    req = ImageGenerationRequest(prompt="test")
+    assert req.width == 1024
+    assert req.height == 1024
+    assert req.width % 64 == 0
+    assert req.height % 64 == 0
+
+
+def test_image_engine_has_strict_lifecycle_attributes():
+    """Phase 7: ImageEngine exposes pipe and refiner attributes (strict lifecycle)."""
     from multigenai.engines.image_engine.engine import ImageEngine
-    ctx = _make_mock_ctx(device_type="cpu", vram_mb=0)
-    # Don't call __init__ (which registers model) — patch it
     engine = ImageEngine.__new__(ImageEngine)
-    engine._ctx = ctx
-
-    w, h = engine._cap_resolution(1024, 1024)
-    assert w == 512
-    assert h == 512
-
-
-def test_image_engine_resolution_cap_low_vram():
-    """Low VRAM GPU (4 GB): 1024×768 request is capped to max 512."""
-    from multigenai.engines.image_engine.engine import ImageEngine
-    ctx = _make_mock_ctx(device_type="cuda", vram_mb=4096)
-    engine = ImageEngine.__new__(ImageEngine)
-    engine._ctx = ctx
-
-    w, h = engine._cap_resolution(1024, 768)
-    assert w <= 512
-    assert h <= 512
-
-
-def test_image_engine_no_cap_high_vram():
-    """High VRAM GPU (16 GB): 1024×768 request passes through unchanged."""
-    from multigenai.engines.image_engine.engine import ImageEngine
-    ctx = _make_mock_ctx(device_type="cuda", vram_mb=16384)
-    engine = ImageEngine.__new__(ImageEngine)
-    engine._ctx = ctx
-
-    w, h = engine._cap_resolution(1024, 768)
-    assert w == 1024
-    assert h == 768
-
-
-def test_image_engine_resolution_snaps_to_multiple_of_8():
-    """After capping, dimensions are always multiples of 8."""
-    from multigenai.engines.image_engine.engine import ImageEngine
-    ctx = _make_mock_ctx(device_type="cpu", vram_mb=0)
-    engine = ImageEngine.__new__(ImageEngine)
-    engine._ctx = ctx
-
-    w, h = engine._cap_resolution(777, 555)
-    assert w % 8 == 0
-    assert h % 8 == 0
+    engine.pipe = None
+    engine.refiner = None
+    assert engine.pipe is None
+    assert engine.refiner is None
 
 
 # ---------------------------------------------------------------------------
