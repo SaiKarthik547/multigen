@@ -80,16 +80,16 @@ def _apply_memory_optimizations(pipe, device: str) -> None:
     """
     if device == "cuda":
         pipe.enable_sequential_cpu_offload()
-        pipe.enable_vae_tiling()
+        pipe.vae.enable_tiling()
         pipe.enable_attention_slicing()
     elif device == "directml":
         # DirectML: no sequential offload, but tiling and slicing help
-        pipe.enable_vae_tiling()
+        pipe.vae.enable_tiling()
         pipe.enable_attention_slicing()
         pipe = pipe.to(device)
     else:
         # CPU: tiling saves RAM; no CUDA-specific offloading
-        pipe.enable_vae_tiling()
+        pipe.vae.enable_tiling()
         pipe = pipe.to(device)
     return pipe
 

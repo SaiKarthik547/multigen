@@ -26,7 +26,7 @@ def test_apply_memory_optimizations_cuda():
     
     # Needs sequence CPU offload, VAE Tiling, and Attention slicing
     mock_pipe.enable_sequential_cpu_offload.assert_called_once()
-    mock_pipe.enable_vae_tiling.assert_called_once()
+    mock_pipe.vae.enable_tiling.assert_called_once()
     mock_pipe.enable_attention_slicing.assert_called_once()
 
 def test_apply_memory_optimizations_directml():
@@ -37,7 +37,7 @@ def test_apply_memory_optimizations_directml():
     _apply_memory_optimizations(mock_pipe, device="directml")
     
     mock_pipe.enable_sequential_cpu_offload.assert_not_called()
-    mock_pipe.enable_vae_tiling.assert_called_once()
+    mock_pipe.vae.enable_tiling.assert_called_once()
     mock_pipe.enable_attention_slicing.assert_called_once()
     mock_pipe.to.assert_called_once_with("directml")
 
@@ -50,7 +50,7 @@ def test_apply_memory_optimizations_cpu():
     
     mock_pipe.enable_sequential_cpu_offload.assert_not_called()
     mock_pipe.enable_attention_slicing.assert_not_called()  # We didn't enable slicing for cpu in impl
-    mock_pipe.enable_vae_tiling.assert_called_once()
+    mock_pipe.vae.enable_tiling.assert_called_once()
     mock_pipe.to.assert_called_once_with("cpu")
 
 
