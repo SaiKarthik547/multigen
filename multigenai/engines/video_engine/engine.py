@@ -84,7 +84,6 @@ class VideoEngine:
         #   enable_vae_tiling:      decodes frames in tiles — ~60% less VRAM peak
         if self.device == "cuda":
             self.pipe.enable_sequential_cpu_offload()
-            self.pipe.enable_vae_tiling()
         else:
             self.pipe = self.pipe.to(self.device)
 
