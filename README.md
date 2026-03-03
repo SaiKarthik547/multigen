@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://python.org)
 [![Diffusers](https://img.shields.io/badge/Diffusers-0.24%2B-orange)](https://github.com/huggingface/diffusers)
-[![Tests](https://img.shields.io/badge/Tests-227%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/Tests-231%20passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/License-MIT-green)](#license)
 
 ---
@@ -63,14 +63,15 @@ Intent → SceneDesigner → PromptCompiler → Isolated Engine → ModelLifecyc
 
 - **🎨 Creative Intelligence Layer (Phase 7)** — `SceneDesigner` converts raw intent into a structured `SceneBlueprint`; `PromptCompiler` turns that into optimized diffusion prompts with model-specific negative tokens
 - **🔒 Strict Model Lifecycle** — `ModelLifecycle.safe_unload()` ensures VRAM is fully evacuated after every generation; base and refiner are NEVER loaded simultaneously
-- **🎬 SVD-XT Video Generation (Phase 6)** — Single-pass Stable Video Diffusion XT pipeline with sequentially-offloaded UNet; `ffmpeg` direct byte-pipe encoding produces `.mp4` without intermediate disk writes
+- **🖼️ Multi-Model ImageEngine** — Auto-detects pipeline class from the repo id: SDXL repos load `StableDiffusionXLPipeline` (fp16 variant); SD 1.x repos load `StableDiffusionPipeline` — no `variant` kwarg mismatch; `vae.enable_tiling()` + attention slicing apply to both
+- **🎬 SVD-XT Video Generation (Phase 6, Hardened)** — SVD-XT pipeline with `decode_chunk_size=2` for ~50% peak VRAM reduction during temporal VAE decode; adaptive pixel-area frame cap (>`600 000px` → max 8 frames on T4); `motion_bucket_id` clamped to `[0, 255]`; `effective_frames` passed explicitly — request object is never mutated; `ffmpeg` streaming lifecycle uses `wait()` before `stderr.read()` to eliminate flush-of-closed-file race on fast Kaggle exits
 - **🤖 GenerationManager Orchestration** — All modalities flow through a single orchestrator; engines are instantiated, run, and destroyed per-request — no engine shares state with another
 - **🧠 Dual LLM Mode** — LLM-enhanced prompts (Gemini/OpenAI/Ollama) with automatic rule-based fallback; zero config required for offline use
 - **👤 Persistent Character Identity** — 512-d ArcFace face embeddings via InsightFace, stored persistently and injected for frame-consistent characters
 - **🌍 Adaptive Execution** — Auto-detects Kaggle, GPU VRAM tier, DirectML (AMD on Windows), and CI environments; supports `performance_mode` (speed/quality/balanced) toggles
 - **📊 Generation Metrics** — Per-run structured metrics (latency, VRAM usage, seed) stored as JSON
 - **🖥️ Streamlit UI** — Full browser-based UI with modality selector and real-time capability report
-- **✅ 227 Tests Passing** — Comprehensive test coverage across all modules without requiring GPU or network
+- **✅ 231 Tests Passing** — Comprehensive test coverage across all modules without requiring GPU or network
 
 ---
 
@@ -852,7 +853,7 @@ vid_result = manager.generate_video(VideoGenerationRequest(
 ## Running Tests
 
 ```bash
-# Run all 227 tests
+# Run all 231 tests
 pytest tests/ -v
 
 # Individual suites
@@ -876,7 +877,7 @@ pytest tests/test_compute_stability.py -v  # Metrics, registry, lifecycle (54 te
 | Phase 3 | ✅ Complete | Adaptive execution: BehaviourProfile matrix, auto mode resolution, Kaggle-safe memory policies |
 | Phase 4 | ✅ Complete | Identity Layer: FaceEncoder (ArcFace), IdentityStore (v3), IdentityResolver, ConsistencyEnforcer |
 | Phase 5 | ✅ Complete | Hard consistency enforcement: seed injection, embedding drift tracking, temporal coherence |
-| Phase 6 | ✅ Complete | **SVD-XT VideoEngine**: single-pass Stable Video Diffusion, sequential offloading, direct ffmpeg encoding |
+| Phase 6 | ✅ Complete | **SVD-XT VideoEngine** (Hardened): single-pass Stable Video Diffusion, `decode_chunk_size=2`, adaptive frame cap, motion_bucket clamping, production-grade ffmpeg streaming |
 | Phase 7 | ✅ Complete | **Architecture Overhaul**: SceneDesigner, PromptCompiler, ModelLifecycle, GenerationManager as sole orchestrator, strict VRAM isolation |
 | Phase 8 | 🔜 Planned | Audio Engine: voice cloning (YourTTS/Bark), music generation (MusicGen), SFX synthesis |
 | Phase 9 | 🔜 Planned | ControlNet integration: depth, canny, pose control signals |
