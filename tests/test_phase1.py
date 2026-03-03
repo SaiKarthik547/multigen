@@ -332,7 +332,7 @@ def test_image_request_valid():
     from multigenai.llm.schema_validator import ImageGenerationRequest
     req = ImageGenerationRequest(prompt="a knight at dawn")
     assert req.prompt == "a knight at dawn"
-    assert req.width == 768
+    assert req.width == 1024
 
 
 def test_image_request_invalid_prompt():
@@ -342,32 +342,54 @@ def test_image_request_invalid_prompt():
         ImageGenerationRequest(prompt="")
 
 
-def test_video_request_phase5_defaults():
+def test_video_request_defaults() -> None:
     from multigenai.llm.schema_validator import VideoGenerationRequest
-    req = VideoGenerationRequest(prompt="a knight at dawn")
+    req = VideoGenerationRequest(prompt="test")
+    assert req.num_frames == 16
+    assert req.fps == 8
+    assert req.width == 1024
+    assert req.height == 576
+
+
+def test_video_request_phase5_defaults_and_dimension_validation():
+    from multigenai.llm.schema_validator import VideoGenerationRequest
+    from pydantic import ValidationError
+
+    # Phase 6 defaults
+    req = VideoGenerationRequest(prompt="a knight at dawn", num_frames=4, width=640, height=640)
     assert req.temporal_strength == 0.25
     assert req.motion_hint == ""
-    assert req.num_inference_steps == 20
+    assert req.num_inference_steps == 25
     assert req.num_frames == 4
     assert req.width == 640
     assert req.height == 640
+
+    # Test %64 dimension validation
+    with pytest.raises(ValidationError, match="divisible by 64"):
+        VideoGenerationRequest(prompt="test", width=639)
+    with pytest.raises(ValidationError, match="divisible by 64"):
+        VideoGenerationRequest(prompt="test", height=639)
+    # Valid dimensions
+    req_valid = VideoGenerationRequest(prompt="test", width=512, height=512)
+    assert req_valid.width == 512
+    assert req_valid.height == 512
 
 
 def test_video_request_temporal_strength_range():
     from multigenai.llm.schema_validator import VideoGenerationRequest
     from pydantic import ValidationError
-    
+
     # Valid explicit override
     req = VideoGenerationRequest(prompt="test", temporal_strength=0.35)
     assert req.temporal_strength == 0.35
-    
-    # Above max
+
+    # Above max (1.0)
     with pytest.raises(ValidationError):
-        VideoGenerationRequest(prompt="test", temporal_strength=0.9)
-        
-    # Below min
+        VideoGenerationRequest(prompt="test", temporal_strength=1.5)
+
+    # Below min (0.0)
     with pytest.raises(ValidationError):
-        VideoGenerationRequest(prompt="test", temporal_strength=0.05)
+        VideoGenerationRequest(prompt="test", temporal_strength=-0.1)
 
 
 def test_latent_propagator_inject_noise_signature():
@@ -377,19 +399,7 @@ def test_latent_propagator_inject_noise_signature():
     assert callable(lp.inject_noise)
 
 
-def test_image_engine_run_from_previous_frame_signature(tmp_path):
-    from multigenai.engines.image_engine.engine import ImageEngine
-    from multigenai.core.execution_context import ExecutionContext
-    from multigenai.core.config.settings import get_settings
-    
-    s = get_settings()
-    s.output_dir = str(tmp_path)
-    s.memory.store_dir = str(tmp_path / ".memory")
-    ctx = ExecutionContext.build(s)
-    
-    engine = ImageEngine(ctx)
-    assert hasattr(engine, "run_from_previous_frame")
-    assert callable(engine.run_from_previous_frame)
+
 
 
 def test_prompt_engine_process_image(tmp_path):
@@ -398,7 +408,7 @@ def test_prompt_engine_process_image(tmp_path):
     from multigenai.memory.style_registry import StyleRegistry
     sr = StyleRegistry(store_dir=str(tmp_path))
     engine = PromptEngine(style_registry=sr)
-    req = ImageGenerationRequest(prompt="a stormy sea", style_id="cinematic-dark")
+    req = ImageGenerationRequest(prompt="a stormy sea", style="cinematic-dark")
     enhanced = engine.process_image(req)
     assert "stormy sea" in enhanced.enhanced
     assert len(enhanced.negative) > 10

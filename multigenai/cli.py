@@ -65,16 +65,15 @@ def image(
     """Generate a cinematic image from a text prompt."""
     settings, ctx = _startup()
     from multigenai.llm.schema_validator import ImageGenerationRequest
-    from multigenai.engines.image_engine.engine import ImageEngine
+    from multigenai.core.generation_manager import GenerationManager
 
     request = ImageGenerationRequest(
-        prompt=prompt, style_id=style,
+        prompt=prompt, style=style,
         width=width, height=height,
-        num_inference_steps=steps, guidance_scale=guidance,
         seed=seed,
     )
     console.print(Panel(f"[bold cyan]Generating image…[/bold cyan]\nPrompt: {prompt}", title="Image Engine"))
-    result = ImageEngine(ctx).run(request)
+    result = GenerationManager(ctx).generate_image(request)
     if result.success:
         console.print(f"[bold green]✔ Done![/bold green] Saved to: {result.path}")
         console.print(f"   Seed: {result.seed} | Size: {result.width}×{result.height}")
@@ -100,7 +99,7 @@ def video(
     """Generate a video from a text prompt."""
     settings, ctx = _startup()
     from multigenai.llm.schema_validator import VideoGenerationRequest
-    from multigenai.engines.video_engine.engine import VideoEngine
+    from multigenai.core.generation_manager import GenerationManager
 
     request = VideoGenerationRequest(
         prompt=prompt, style_id=style,
@@ -108,7 +107,7 @@ def video(
         width=width, height=height, seed=seed,
     )
     console.print(Panel(f"[bold cyan]Generating video ({frames} frames)…[/bold cyan]\nPrompt: {prompt}", title="Video Engine"))
-    result = VideoEngine(ctx).run(request)
+    result = GenerationManager(ctx).generate_video(request)
     if result.success:
         console.print(f"[bold green]✔ Done![/bold green] Saved to: {result.path}")
     else:
@@ -130,14 +129,14 @@ def audio(
     """Generate audio (voice, music, or sfx) from a text prompt."""
     settings, ctx = _startup()
     from multigenai.llm.schema_validator import AudioGenerationRequest
-    from multigenai.engines.audio_engine.engine import AudioEngine
+    from multigenai.core.generation_manager import GenerationManager
 
     request = AudioGenerationRequest(
         prompt=prompt, audio_type=audio_type,
         duration_seconds=duration, output_format=output_format,
     )
     console.print(Panel(f"[bold cyan]Generating audio ({audio_type}, {duration}s)…[/bold cyan]", title="Audio Engine"))
-    result = AudioEngine(ctx).run(request)
+    result = GenerationManager(ctx).generate_audio(request)
     if result.success:
         console.print(f"[bold green]✔ Done![/bold green] Saved to: {result.path}")
     else:
@@ -158,6 +157,7 @@ def document(
     """Generate a Word document or PowerPoint presentation."""
     settings, ctx = _startup()
     from multigenai.llm.schema_validator import DocumentGenerationRequest
+    from multigenai.core.generation_manager import GenerationManager
 
     request = DocumentGenerationRequest(
         prompt=prompt, output_format=output_format, style_id=style,
@@ -165,14 +165,11 @@ def document(
     )
     console.print(Panel(f"[bold cyan]Generating {output_format}…[/bold cyan]\nTopic: {prompt}", title="Document Engine"))
 
+    manager = GenerationManager(ctx)
     if output_format == "pptx":
-        from multigenai.engines.presentation_engine.engine import PresentationEngine
-        result = PresentationEngine(ctx).run(request)
-        path, success, error = result.path, result.success, result.error
+        result = manager.generate_presentation(request)
     else:
-        from multigenai.engines.document_engine.engine import DocumentEngine
-        result = DocumentEngine(ctx).run(request)
-        path, success, error = result.path, result.success, result.error
+        result = manager.generate_document(request)
 
     if success:
         console.print(f"[bold green]✔ Done![/bold green] Saved to: {path}")

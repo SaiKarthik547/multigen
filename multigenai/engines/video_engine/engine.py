@@ -1,18 +1,20 @@
 """
-VideoEngine — Frame-sequence video generation with temporal consistency.
+VideoEngine — True Temporal Video Generation using Stable Video Diffusion (SVD-XT).
 
-Phase 1: Migrated from MultiGenAi.py with ExecutionContext injection.
-Phase 5: Latent-chained sequential img2img for inter-frame stability.
-         Frame 0 is a full text2img denoise; frames 1+ are img2img passes
-         conditioned on the previous frame (PIL-based, not true latent chaining).
-         Deterministic via a single shared torch.Generator created once per run.
+Phase 6: Replaces the Phase 5 (Iterative SDXL img2img) hack with a pristine SVD-XT pipeline.
+- SVD-XT is loaded lazily, bypassing the global ModelRegistry.
+- Uses `enable_sequential_cpu_offload()` for memory efficiency on Kaggle.
+- Direct `ffmpeg` byte-piping replaces slow `moviepy` dependencies.
+- Strict unload lifecycle (`gc.collect()`, `empty_cache()`, `ipc_collect()`) guarantees VRAM
+  is entirely cleared after generation, avoiding collisions with ImageEngine (SDXL).
 """
 
 from __future__ import annotations
 
+import gc
 import os
 import pathlib
-import random
+import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
@@ -20,10 +22,14 @@ from multigenai.core.exceptions import EngineExecutionError
 from multigenai.core.logging.logger import get_logger
 
 if TYPE_CHECKING:
+    from PIL import Image as PILImage
     from multigenai.core.execution_context import ExecutionContext
     from multigenai.llm.schema_validator import VideoGenerationRequest
 
 LOG = get_logger(__name__)
+
+# Phase 6 Model Selection
+SVD_MODEL_ID = "stabilityai/stable-video-diffusion-img2vid-xt"
 
 
 @dataclass
@@ -39,286 +45,207 @@ class VideoResult:
 
 class VideoEngine:
     """
-    Generates video by producing keyframes with ImageEngine and stitching them.
-
-    Phase 5 temporal pipeline:
-        Frame 0  → full SDXL text2img denoise (anchor frame)
-        Frame i  → SDXL img2img pass, init=prev_frame, strength=temporal_strength
-                   Optional: identity similarity guard retries (max 2 per frame)
-        Generator → created once, never re-seeded — noise injected by img2img strength only.
-
-    Usage:
-        engine = VideoEngine(ctx)
-        result = engine.run(VideoGenerationRequest(prompt="a stormy sea at night"))
+    True Temporal Video Generation Engine.
+    
+    Generates [B, T, C, H, W] latent frames from a single conditioning image in one
+    forward pass using SVD-XT, encodes directly using ffmpeg, and drops all weights
+    immediately from VRAM to prevent pipeline collisions.
     """
 
     def __init__(self, ctx: "ExecutionContext") -> None:
         self._ctx = ctx
         self._out_dir = pathlib.Path(ctx.settings.output_dir)
         self._out_dir.mkdir(parents=True, exist_ok=True)
+        self.device = ctx.device
+        self.pipe = None
 
-    def run(self, request: "VideoGenerationRequest") -> VideoResult:
-        """Generate a video from the validated request."""
-        from multigenai.engines.image_engine.engine import ImageEngine, _slug
-        from multigenai.llm.schema_validator import ImageGenerationRequest
+    def _load_model(self) -> None:
+        """
+        Lazily loads SVD-XT directly, circumventing the ModelRegistry.
+        Uses sequential CPU offloading to prevent extreme memory spikes.
+        """
+        import torch
+        from diffusers import StableVideoDiffusionPipeline
 
-        seed = request.seed if request.seed is not None else random.randint(0, 1_000_000)
-        out_path = self._out_dir / f"{_slug(request.prompt)}.mp4"
+        if self.pipe is not None:
+            return
 
-        # Check MoviePy availability
-        try:
-            from moviepy.editor import ImageClip, concatenate_videoclips
-        except ImportError:
-            msg = "MoviePy not installed — install via: pip install 'multigenai[video]'"
-            LOG.error(msg)
-            return VideoResult(path="", frame_count=0, fps=request.fps, seed=seed, success=False, error=msg)
+        LOG.info(f"Loading {SVD_MODEL_ID} (fp16, sequential CPU offload)...")
+        
+        self.pipe = StableVideoDiffusionPipeline.from_pretrained(
+            SVD_MODEL_ID,
+            torch_dtype=torch.float16,
+            variant="fp16"
+        )
+        
+        # Kaggle Safe: Sequential offload is far more stable for SVD-XT than model offload
+        if self.device == "cuda":
+            self.pipe.enable_sequential_cpu_offload()
+        else:
+            self.pipe = self.pipe.to(self.device)
 
-        image_engine = ImageEngine(self._ctx)
-        frame_paths: List[str] = []
+    def _unload_model(self) -> None:
+        """
+        Forcefully unloads the SVD-XT pipeline from system and GPU memory.
+        This must be called immediately after encoding to keep the environment
+        sterile for incoming ImageEngine (SDXL) processes.
+        """
+        LOG.debug("Unloading SVD-XT and clearing VRAM...")
+        if self.pipe:
+            del self.pipe
+            self.pipe = None
 
-        # Resolve identity profile once before the frame loop to avoid
-        # repeated disk IO (IdentityStore reads from disk on every call).
-        profile = None
-        if getattr(request, "identity_name", None):
-            from multigenai.memory.identity_store import IdentityStore
-            store = IdentityStore(self._ctx.settings.output_dir)
-            profile = store.get_profile(request.identity_name)
-
-        # --- Phase 5: Deterministic generator — created ONCE, never re-seeded ---
-        generator = None
+        gc.collect()
+        
         try:
             import torch
-            device = self._ctx.device
-            generator = torch.Generator(device=device).manual_seed(seed)
-            LOG.debug(f"Phase 5: Generator seeded with {seed} on device={device}")
-        except ImportError:
-            LOG.warning("torch not available — generator disabled; reproducibility reduced.")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+                LOG.debug("CUDA memory completely flushed (including IPC handles).")
+        except Exception as exc:
+            LOG.warning(f"Error flushing CUDA memory: {exc}")
 
-        # --- Phase 5: Lock prompt — no frame index drift ---
-        effective_prompt = request.prompt
-        motion_hint = getattr(request, "motion_hint", "")
-        if motion_hint:
-            effective_prompt = f"{effective_prompt}, {motion_hint}"
+    def _generate_video(self, request: "VideoGenerationRequest", conditioning_image: "PILImage") -> List["PILImage"]:
+        """
+        Executes the SVD-XT forward pass, returning a list of PIL Images.
+        """
+        import torch
 
-        # Resolve per-run seed: use character persistent_seed if available
-        frame_seed = seed
-        if (
-            profile is not None
-            and request.seed is None
-            and profile.persistent_seed is not None
-        ):
-            frame_seed = profile.persistent_seed
-
-        # Build a single ImageGenerationRequest shared for all frames.
-        # Prompt is locked; strength is controlled by run_from_previous_frame.
-        img_req = ImageGenerationRequest(
-            prompt=effective_prompt,
-            negative_prompt=request.negative_prompt,
-            character_id=request.character_id,
-            scene_id=request.scene_id,
-            style_id=request.style_id,
-            width=request.width,
-            height=request.height,
-            seed=frame_seed,
-            num_inference_steps=getattr(request, "num_inference_steps", 30),
-            identity_name=getattr(request, "identity_name", None),
-            identity_strength=getattr(request, "identity_strength", 0.8),
+        seed = request.seed if request.seed is not None else torch.randint(0, 1_000_000, (1,)).item()
+        generator = torch.Generator(device=self.device).manual_seed(seed)
+        
+        # Map Phase 5 temporal_strength (0.0 to 1.0) to native SVD motion_bucket_id (0 to 255)
+        motion_bucket = int(request.temporal_strength * 255)
+        
+        LOG.info(
+            f"Phase 6: Generating {request.num_frames} frames via SVD-XT. "
+            f"Seed={seed}, resolution={request.width}x{request.height}, "
+            f"steps={request.num_inference_steps}, motion_bucket_id={motion_bucket}."
         )
 
-        temporal_strength = getattr(request, "temporal_strength", 0.25)
-        identity_threshold = getattr(request, "identity_threshold", 0.55)
-        prev_image = None
+        frames = self.pipe(
+            image=conditioning_image,
+            num_frames=request.num_frames,
+            num_inference_steps=request.num_inference_steps,
+            height=request.height,
+            width=request.width,
+            generator=generator,
+            motion_bucket_id=motion_bucket,
+        ).frames[0]
+
+        return frames
+
+    def _encode_video(self, frames: List["PILImage"], path: str, fps: int) -> None:
+        """
+        Pipes raw RGB24 frames securely into an ffmpeg subprocess.
+        Bypasses `moviepy` entirely for zero-overhead, production-grade speeds.
+        """
+        import numpy as np
         
-        # --- PREVENT IDENTITY GUARD COMPUTE OVERHEAD ---
-        # Instantiating FaceEncoder is extremely expensive (ONNX load).
-        # We MUST hoist it outside the frame loop so it's loaded only once per video.
-        face_encoder = None
-        consistency_enforcer = None
-        if profile is not None and getattr(profile, "face_embedding", None):
-            try:
-                from multigenai.identity.face_encoder import FaceEncoder
-                from multigenai.control.consistency_enforcer import ConsistencyEnforcer
-                face_encoder = FaceEncoder()
-                consistency_enforcer = ConsistencyEnforcer()
-            except ImportError as exc:
-                LOG.warning(f"Identity guard skipped: insightface not available ({exc}).")
-                face_encoder = None
-                consistency_enforcer = None
+        if not frames:
+            raise ValueError("No frames provided for encoding.")
+
+        width, height = frames[0].size
         
-        # --- PREVENT RE-LOADING BUG ---
-        # ImageEngine.run() normally auto-unloads the models at the end of the generation 
-        # if Kaggle memory profiles are active. We MUST disable this during the video 
-        # loop, otherwise Frame 0 unloads the model, forcing Frame 1 to re-load 6GB from disk.
-        original_auto_unload = self._ctx.behaviour.auto_unload_after_gen
-        self._ctx.behaviour.auto_unload_after_gen = False
+        LOG.info(f"Encoding {len(frames)} frames to H.264 mp4 via ffmpeg pipe...")
+        
+        command = [
+            "ffmpeg",
+            "-y",                  # overwrite output
+            "-f", "rawvideo",
+            "-vcodec", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-s", f"{width}x{height}",
+            "-r", str(fps),
+            "-i", "-",             # read from stdin
+            "-an",                 # no audio
+            "-vcodec", "libx264",
+            "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p",
+            path
+        ]
 
         try:
-            LOG.info(
-                f"Phase 5: Generating {request.num_frames} frames "
-                f"(seed={seed}, temporal_strength={temporal_strength})..."
-            )
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            for frame in frames:
+                # Convert PIL to uint8 RGB buffer and write to pipe
+                process.stdin.write(np.array(frame).astype(np.uint8).tobytes())
+                
+            process.stdin.close()
+            process.wait()
 
-            for i in range(request.num_frames):
-
-                if i == 0 or prev_image is None:
-                    # --- Frame 0: full text2img denoise (anchor frame) ---
-                    img_result = image_engine.run(img_req)
-                    if not img_result.success:
-                        raise EngineExecutionError("video_engine", "Frame 1 (anchor) generation failed.")
-
-                    # Load the saved anchor image as PIL for the next frame
-                    try:
-                        from PIL import Image as PILImage
-                        prev_image = PILImage.open(img_result.path).copy()
-                    except Exception as pil_exc:
-                        LOG.warning(f"Could not load anchor frame as PIL ({pil_exc}); Phase 5 chaining disabled.")
-                        prev_image = None
-
-                    frame_paths.append(img_result.path)
-                    LOG.info(f"  Frame 1/{request.num_frames} done (anchor, full denoise).")
-
-                else:
-                    # Identity similarity guard (max 2 retries per frame)
-                    current_strength = temporal_strength
-                    attempts = 0
-                    img_result = None
-                    new_image = None
-
-                    while attempts < 2:
-                        # --- NOISE INJECTION (Inside loop) ---
-                        # Must be inside the retry loop so that each attempt (with 
-                        # slightly changing strength) gets a fresh noise application,
-                        # preventing endless deterministic repetition of a failed frame.
-                        init_image = prev_image
-                        if generator is not None:
-                            try:
-                                from multigenai.temporal.latent_propagator import LatentPropagator
-                                init_image = LatentPropagator().inject_noise(
-                                    prev_image, current_strength, generator
-                                )
-                            except Exception as noise_exc:
-                                LOG.debug(f"inject_noise skipped: {noise_exc}")
-                        
-                        img_result, new_image = image_engine.run_from_previous_frame(
-                            img_req, init_image, current_strength, generator
-                        )
-
-                        if not img_result.success:
-                            break  # OOM or other failure — accept prev_image
-
-                        # Identity guard: only runs if models successfully hoisted above
-                        if face_encoder is not None and consistency_enforcer is not None and img_result.path:
-                            try:
-                                frame_emb = face_encoder.extract(img_result.path)
-                                similarity = consistency_enforcer.check_embedding_drift(
-                                    frame_emb, profile.face_embedding
-                                )
-                                LOG.debug(
-                                    f"  Frame {i+1}: identity similarity={similarity:.3f} "
-                                    f"(threshold={identity_threshold})"
-                                )
-
-                                if similarity >= identity_threshold:
-                                    break  # acceptable — use this frame
-
-                                # Below threshold: reduce strength and retry
-                                current_strength *= 0.8
-                                LOG.debug(
-                                    f"  Frame {i+1}: drift detected — retry "
-                                    f"{attempts+1}/2 with strength={current_strength:.3f}"
-                                )
-                                attempts += 1
-
-                            except Exception as guard_exc:
-                                # Embedding extraction failed
-                                LOG.debug(f"  Identity extraction failed: {guard_exc}")
-                                break
-                        else:
-                            break  # no embedding to check → accept frame
-
-                    if attempts >= 2:
-                        LOG.warning(
-                            f"  Frame {i+1}: identity drift accepted after max retries "
-                            f"(final strength={current_strength:.3f})."
-                        )
-
-                    if img_result is None or not img_result.success:
-                        # OOM fallback: reuse previous frame path rather than hard-fail
-                        LOG.warning(
-                            f"  Frame {i+1}: img2img failed — repeating previous frame."
-                        )
-                        if frame_paths:
-                            frame_paths.append(frame_paths[-1])
-                        else:
-                            raise EngineExecutionError("video_engine", f"Frame {i+1} failed with no fallback.")
-                    else:
-                        frame_paths.append(img_result.path)
-                        if new_image is not None:
-                            prev_image = new_image
-
-                    LOG.info(f"  Frame {i+1}/{request.num_frames} done.")
-
-            LOG.info(f"Stitching {len(frame_paths)} frames at {request.fps} fps...")
-            clips = [ImageClip(fp).set_duration(request.frame_duration) for fp in frame_paths]
-            video = concatenate_videoclips(clips, method="compose")
-
-            video.write_videofile(
-                str(out_path),
-                fps=request.fps,
-                codec="libx264",
-                audio=False,                 # CRITICAL for Kaggle
-                preset="ultrafast",          # Faster encode, less RAM
-                threads=2,
-                verbose=False,
-                logger=None,
-            )
-
-            # --- Explicit MoviePy cleanup ---
-            video.close()
-            for clip in clips:
-                clip.close()
-            del video
-            del clips
-
-            # --- Phase 5: GPU memory cleanup ---
-            del prev_image          # release PIL chain reference
-            # NOTE: do NOT delete generator — it is garbage collected naturally
-            try:
-                import gc
-                import torch
-                torch.cuda.empty_cache()
-                gc.collect()
-            except ImportError:
-                pass
-
-            LOG.info(f"Video saved: {out_path}")
-            return VideoResult(
-                path=str(out_path),
-                frame_count=len(frame_paths),
-                fps=request.fps,
-                seed=seed
-            )
-
-        except EngineExecutionError:
-            raise
+            if process.returncode != 0:
+                stderr_output = process.stderr.read().decode()
+                raise RuntimeError(f"FFmpeg encoding failed (code {process.returncode}):\n{stderr_output}")
+                
+        except FileNotFoundError:
+            raise RuntimeError("ffmpeg is not installed or not in system PATH.")
         except Exception as exc:
-            LOG.error(f"Video engine error: {exc}")
+            raise RuntimeError(f"Video encoding failed: {exc}")
+
+    # ------------------------------------------------------------------
+    # Public interface (invoked ONLY by GenerationManager in Phase 6)
+    # ------------------------------------------------------------------
+    def generate(self, request: "VideoGenerationRequest", conditioning_image_path: str) -> VideoResult:
+        """
+        Main execution flow properly decoupled from other engines.
+        """
+        from multigenai.engines.image_engine.engine import _slug
+        
+        img_slug = _slug(request.prompt)
+        # Handle Windows invalid path characters if prompt mapping
+        out_path = self._out_dir / f"{img_slug}.mp4"
+        
+        seed = request.seed if request.seed is not None else 42
+        
+        try:
+            # 1. Load Conditioning Image 
+            # (Generated by ImageEngine before VideoEngine was ever instantiated)
+            from PIL import Image as PILImage
+            LOG.debug(f"Loading conditioning keyframe: {conditioning_image_path}")
+            init_image = PILImage.open(conditioning_image_path).copy()
+            
+            if init_image.size != (request.width, request.height):
+                 LOG.debug(f"Resizing conditioning image from {init_image.size} to {request.width}x{request.height}")
+                 init_image = init_image.resize((request.width, request.height), PILImage.Resampling.LANCZOS)
+
+            # 2. Strict Model Loading
+            self._load_model()
+            
+            # 3. SVD-XT Latent Generation
+            frames = self._generate_video(request, init_image)
+            
+            # 4. ffmpeg byte-pipe encoding
+            self._encode_video(frames, str(out_path), request.fps)
+
+        except Exception as exc:
+            LOG.error(f"SVD Video engine error: {exc}")
             return VideoResult(path="", frame_count=0, fps=request.fps, seed=seed, success=False, error=str(exc))
         finally:
-            # Restore original memory behaviour policy
-            self._ctx.behaviour.auto_unload_after_gen = original_auto_unload
+            # 5. Strict Model Unload (MUST run even if Generation crashes)
+            self._unload_model()
 
-            for fp in frame_paths:
-                try:
-                    os.remove(fp)
-                except OSError:
-                    pass
+        return VideoResult(
+            path=str(out_path), 
+            frame_count=request.num_frames, 
+            fps=request.fps, 
+            seed=seed, 
+            success=True
+        )
 
-    # Phase 5 hooks (promoted from stubs)
-    def run_with_motion_module(self, request: "VideoGenerationRequest") -> VideoResult:
-        """[Phase 6] AnimateDiff motion module injection."""
-        raise NotImplementedError("Motion module activates in Phase 6.")
+    # ------------------------------------------------------------------
+    # Phase 6 / Phase 8 Hooks
+    # ------------------------------------------------------------------
+    def inject_motion_lora(self) -> None:
+        """[Phase 8 Stub] Dynamic injection of motion-specific LoRAs into SVD-XT."""
+        pass
 
-    def run_with_optical_flow(self, request: "VideoGenerationRequest") -> VideoResult:
-        """[Phase 6] Optical-flow guided temporal smoothing."""
-        raise NotImplementedError("Optical flow activates in Phase 6.")
+    def inject_controlnet(self) -> None:
+        """[Phase 8 Stub] Structural video conditioning hook."""
+        pass
+
+    def inject_depth_guidance(self) -> None:
+        """[Phase 8 Stub] SVD-XT dynamic depth mask manipulation."""
+        pass

@@ -9,7 +9,7 @@ sane defaults so callers don't need to specify every field.
 from __future__ import annotations
 
 from typing import List, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -39,25 +39,33 @@ class ImageGenerationRequest(BaseModel):
     """Validated request for the Image Engine."""
     prompt: str = Field(..., min_length=3, description="Base image prompt.")
     negative_prompt: str = ""
+
+    # Creative Controls
+    style: Optional[str] = "cinematic"
+    camera: Optional[str] = "medium"
+    environment_detail_level: float = Field(default=0.8, ge=0.0, le=1.0)
+
+    # Model Controls
+    model_name: str = "sdxl-base"
+    use_refiner: bool = True
+
+    # Technical Controls
+    width: int = Field(default=1024, ge=64, le=4096)
+    height: int = Field(default=1024, ge=64, le=4096)
+    seed: Optional[int] = 42
+
+    # --- Phase 4 / 6 backward compatibility ---
     character_id: Optional[str] = None
     scene_id: Optional[str] = None
-    style_id: Optional[str] = None
-    lighting: LightingProfile = Field(default_factory=LightingProfile)
-    camera: CameraProfile = Field(default_factory=CameraProfile)
-    width: int = Field(default=768, ge=64, le=4096)
-    height: int = Field(default=768, ge=64, le=4096)
-    num_inference_steps: int = Field(default=50, ge=10, le=150)
-    guidance_scale: float = Field(default=7.5, ge=1.0, le=20.0)
-    seed: Optional[int] = None
-    # --- Phase 4: Identity conditioning ---
     identity_name: Optional[str] = None
-    identity_strength: float = Field(
-        default=0.8, ge=0.0, le=1.5,
-        description=(
-            "IP-Adapter identity conditioning strength. "
-            "Range 0.0–1.5 (>1.0 for experimentation only; engine clamps to 1.0 for stability)."
-        ),
-    )
+    identity_strength: float = Field(default=0.8, ge=0.0, le=1.5)
+
+    @field_validator("width", "height")
+    @classmethod
+    def validate_resolution(cls, v: int) -> int:
+        if v % 64 != 0:
+            raise ValueError(f"Resolution must be divisible by 64")
+        return v
 
     @field_validator("prompt")
     @classmethod
@@ -75,11 +83,11 @@ class VideoGenerationRequest(BaseModel):
     character_id: Optional[str] = None
     scene_id: Optional[str] = None
     style_id: Optional[str] = None
-    num_frames: int = Field(default=4, ge=2, le=200)
+    num_frames: int = Field(default=16, ge=4, le=60)
     frame_duration: float = Field(default=0.5, ge=0.1)
-    fps: int = Field(default=12, ge=8, le=60)
-    width: int = Field(default=640, ge=64, le=1920)
-    height: int = Field(default=640, ge=64, le=1080)
+    fps: int = Field(default=8, ge=4, le=60)
+    width: int = Field(default=1024, ge=256, le=1920)
+    height: int = Field(default=576, ge=256, le=1080)
     seed: Optional[int] = None
     identity_threshold: float = Field(
         default=0.55, ge=0.0, le=1.0,
@@ -91,19 +99,25 @@ class VideoGenerationRequest(BaseModel):
         default=0.8, ge=0.0, le=1.5,
         description="IP-Adapter conditioning strength propagated to each frame."
     )
-    # --- Phase 5: Temporal engine ---
+    # --- Phase 5: Temporal engine (now mapped to SVD-XT motion_bucket_id) ---
     temporal_strength: float = Field(
-        default=0.25, ge=0.10, le=0.50,
-        description="img2img strength for temporal continuity. 0.10=stable/frozen, 0.50=more motion."
+        default=0.25, ge=0.0, le=1.0,
+        description="Motion strength. 0.0=static, 1.0=high motion. Mapped to SVD motion_bucket_id."
     )
     motion_hint: str = Field(
         default="",
         description="Optional subtle motion suffix appended to prompt (e.g. 'subtle walking motion')."
     )
     num_inference_steps: int = Field(
-        default=20, ge=10, le=100,
-        description="Denoising steps per frame. 20 is the Kaggle-optimized speed default."
+        default=25, ge=10, le=100,
+        description="Denoising steps per frame. 25 is the native SVD-XT default."
     )
+
+    @model_validator(mode='after')
+    def validate_resolution(self):
+        if self.width % 64 != 0 or self.height % 64 != 0:
+            raise ValueError(f"SVD requires dimensions divisible by 64. Got {self.width}x{self.height}")
+        return self
 
 
 class AudioGenerationRequest(BaseModel):
