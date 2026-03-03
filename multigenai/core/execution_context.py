@@ -111,10 +111,18 @@ class ExecutionContext:
 
         LOG = get_logger(__name__)
 
-        # --- Settings fallback (allows zero-arg usage) ---
+        # --- Lifecycle & Settings initialization ---
+        # Using LifecycleManager ensures .env is loaded and HF Hub is authenticated
+        # before any engines are built or models are loaded.
+        from multigenai.core.lifecycle import LifecycleManager
+        lm = LifecycleManager()
+        
         if settings is None:
-            from multigenai.core.config.settings import get_settings
-            settings = get_settings()
+            settings = lm.startup()
+        else:
+            # LifecycleManager.startup() is idempotent; ensures HF login 
+            # and logging are configured even if settings were passed manually.
+            lm.startup()
 
         # --- Environment detection ---
         env = EnvironmentDetector().detect()

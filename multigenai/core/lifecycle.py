@@ -82,8 +82,11 @@ class LifecycleManager:
 
     def __init__(self, config_path: Optional[pathlib.Path] = None) -> None:
         self._config_path = config_path
-        self._settings: Optional[Settings] = None
-        self._started = False
+    _process_started = False
+    _global_settings: Optional[Settings] = None
+
+    def __init__(self, config_path: Optional[pathlib.Path] = None) -> None:
+        self._config_path = config_path
 
     # ------------------------------------------------------------------
     # Public
@@ -91,37 +94,39 @@ class LifecycleManager:
 
     def startup(self) -> Settings:
         """
-        Run the full startup sequence. Idempotent — safe to call multiple times.
+        Run the full startup sequence. Global per-process idempotency.
 
         Returns:
             The loaded Settings instance.
         """
-        if self._started:
-            return self._settings  # type: ignore[return-value]
+        if LifecycleManager._process_started:
+            return LifecycleManager._global_settings  # type: ignore[return-value]
 
         # 1. Load .env (must be before get_settings so env vars are available)
         _load_dotenv()
 
-        # 2. Load config
-        self._settings = get_settings(self._config_path)
+        # 2. Authenticate Hugging Face Hub IMMEDIATELY after loading env
+        # This prevents "unauthenticated request" warnings if subsequent 
+        # imports (like CapabilityReport or ModelRegistry) trigger HF Hub lookups.
+        _login_huggingface()
 
-        # 3. Configure logger
+        # 3. Load config
+        LifecycleManager._global_settings = get_settings(self._config_path)
+
+        # 4. Configure logger
         configure_logging(
-            level=self._settings.log_level,
-            mode=self._settings.log_mode,
-            log_file=self._settings.log_file,
+            level=LifecycleManager._global_settings.log_level,
+            mode=LifecycleManager._global_settings.log_mode,
+            log_file=LifecycleManager._global_settings.log_file,
         )
         LOG.info("MultiGenAI OS starting up…")
 
-        # 4. Authenticate Hugging Face Hub
-        _login_huggingface()
-
         # 5. Ensure output directory exists
-        out_dir = pathlib.Path(self._settings.output_dir)
+        out_dir = pathlib.Path(LifecycleManager._global_settings.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         LOG.debug(f"Output directory: {out_dir.resolve()}")
 
-        # 6. Run capability report (info level — not printed to console unless DEBUG)
+        # 6. Run capability report
         try:
             from multigenai.core.capability_report import CapabilityReport
             cap = CapabilityReport()
@@ -131,25 +136,35 @@ class LifecycleManager:
         except Exception as exc:
             LOG.warning(f"Capability report failed (non-fatal): {exc}")
 
-        # 5. Register shutdown hooks
+        # 7. Register shutdown hooks
         atexit.register(self.shutdown)
 
-        self._started = True
+        LifecycleManager._process_started = True
         LOG.info("Startup complete.")
-        return self._settings
+        return LifecycleManager._global_settings
 
     def shutdown(self) -> None:
         """Run cleanup on process exit (called via atexit or manually)."""
-        if not self._started:
+        if not LifecycleManager._process_started:
             return
-        LOG.info("MultiGenAI OS shutting down…")
+            
+        def safe_log(msg: str):
+            try:
+                LOG.info(msg)
+            except Exception:
+                pass
+
+        safe_log("MultiGenAI OS shutting down…")
 
         # Unload all registered models
         try:
             from multigenai.core.model_registry import ModelRegistry
             ModelRegistry.instance().unload_all()
         except Exception as exc:
-            LOG.warning(f"Model unload error during shutdown: {exc}")
+            try:
+                LOG.warning(f"Model unload error during shutdown: {exc}")
+            except Exception:
+                pass
 
         # Clear CUDA cache
         try:
@@ -158,12 +173,12 @@ class LifecycleManager:
         except Exception:
             pass
 
-        self._started = False
-        LOG.info("Shutdown complete.")
+        LifecycleManager._process_started = False
+        safe_log("Shutdown complete.")
 
     @property
     def settings(self) -> Settings:
         """Return current settings (raises if startup not called yet)."""
-        if self._settings is None:
+        if LifecycleManager._global_settings is None:
             raise RuntimeError("LifecycleManager.startup() must be called first.")
-        return self._settings
+        return LifecycleManager._global_settings
