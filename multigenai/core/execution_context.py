@@ -123,12 +123,13 @@ class ExecutionContext:
                 settings.mode = "kaggle"
             else:
                 settings.mode = "dev"
-        behaviour = build_behaviour(settings.mode, env)
+        behaviour = build_behaviour(settings.mode, env, settings.performance_mode)
         environment = env.model_copy(update={"mode": settings.mode, "behaviour": behaviour})
         LOG.info(
             f"MGOS execution profile | platform={environment.platform} "
             f"device={environment.device_type} vram={environment.vram_mb}MB "
             f"ram={environment.ram_mb}MB mode={settings.mode} "
+            f"performance={settings.performance_mode} "
             f"max_res={behaviour.max_image_resolution} "
             f"auto_unload={behaviour.auto_unload_after_gen}"
         )

@@ -11,6 +11,7 @@ log_mode: pretty                  # pretty | json
 log_file: null                    # null or a path like "logs/mgos.log"
 
 device: auto                      # auto | cuda | directml | cpu
+performance_mode: balanced        # balanced | max-speed | max-quality
 
 model_registry:
   lazy_load: true                 # Load models only when first used

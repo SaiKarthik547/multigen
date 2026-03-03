@@ -111,6 +111,7 @@ class Settings:
     log_mode: str = "pretty"      # "pretty" | "json"
     log_file: Optional[str] = None
     device: str = "auto"
+    performance_mode: str = "balanced"  # max-speed | balanced | max-quality
     model_registry: ModelRegistrySettings = field(default_factory=ModelRegistrySettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
     orchestration: OrchestrationSettings = field(default_factory=OrchestrationSettings)
@@ -188,6 +189,7 @@ def get_settings(config_path: Optional[pathlib.Path] = None) -> Settings:
         log_mode=_env("log_mode", raw.get("log_mode", "pretty")),
         log_file=_env("log_file", raw.get("log_file") or "") or None,
         device=_env("device", raw.get("device", "auto")),
+        performance_mode=_env("performance_mode", raw.get("performance_mode", "balanced")),
         model_registry=ModelRegistrySettings(
             lazy_load=bool(mr_raw.get("lazy_load", True)),
             cache_dir=str(mr_raw.get("cache_dir", "~/.cache/mgos")),

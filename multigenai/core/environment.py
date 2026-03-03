@@ -250,11 +250,12 @@ def resolve_auto_mode(env: EnvironmentProfile) -> str:
     return _MODE_DEV
 
 
-def build_behaviour(mode: str, env: EnvironmentProfile) -> BehaviourProfile:
+def build_behaviour(mode: str, env: EnvironmentProfile, performance_mode: str = "balanced") -> BehaviourProfile:
     """
-    Build a BehaviourProfile from mode + environment.
+    Build a BehaviourProfile from mode + environment + performance intent.
 
-    This is the canonical behaviour matrix from the Phase 3 spec.
+    This is the capability matrix that scales with hardware VRAM and the
+    user-selected performance_mode (max-speed | balanced | max-quality).
 
     Platform    Device   VRAM        max_res  max_frames  controlnets  auto_unload
     ---------   ------   --------    -------  ----------  -----------  -----------
@@ -268,62 +269,38 @@ def build_behaviour(mode: str, env: EnvironmentProfile) -> BehaviourProfile:
     device = env.device_type
     vram = env.vram_mb
 
+    # 1. Start with mode-based defaults
     if mode == _MODE_PRODUCTION:
-        return BehaviourProfile(
-            max_image_resolution=2048,
-            max_video_frames=48,
-            max_controlnets=2,
-            ip_adapter_allowed=True,
-            auto_unload_after_gen=False,
-            batch_size=1,
-        )
+        res, frames, cn = 2048, 48, 2
+    elif device == "cpu":
+        res, frames, cn = 512, 8, 0
+    elif mode == _MODE_KAGGLE:
+        res, frames, cn = 1024, 24, 2
+    else:
+        # Local GPU tiering
+        if vram < 7000:
+            res, frames, cn = 512, 8, 0
+        elif vram < 14000:
+            res, frames, cn = 768, 16, 1
+        else:
+            res, frames, cn = 1024, 24, 2
 
-    if device == "cpu":
-        return BehaviourProfile(
-            max_image_resolution=512,
-            max_video_frames=8,
-            max_controlnets=0,
-            ip_adapter_allowed=False,
-            auto_unload_after_gen=False,
-            batch_size=1,
-        )
+    # 2. Performance Mode scaling (Impacts resolution and frame count only)
+    if performance_mode == "max-speed":
+        res = min(res, 512)
+        frames = min(frames, 8)
+    elif performance_mode == "max-quality":
+        # Boost caps slightly if hardware allows
+        if res >= 1024:
+            res = 1280
+        if frames >= 24:
+            frames = 32
 
-    # GPU path — check VRAM tier
-    if mode == _MODE_KAGGLE:
-        return BehaviourProfile(
-            max_image_resolution=1024,
-            max_video_frames=24,
-            max_controlnets=2,
-            ip_adapter_allowed=True,
-            auto_unload_after_gen=True,  # Kaggle sessions are memory-fragile
-            batch_size=1,
-        )
-
-    # Local GPU — tier by VRAM
-    if vram < 7000:
-        return BehaviourProfile(
-            max_image_resolution=512,
-            max_video_frames=8,
-            max_controlnets=0,
-            ip_adapter_allowed=False,
-            auto_unload_after_gen=False,
-            batch_size=1,
-        )
-    if vram < 14000:
-        return BehaviourProfile(
-            max_image_resolution=768,
-            max_video_frames=16,
-            max_controlnets=1,
-            ip_adapter_allowed=True,
-            auto_unload_after_gen=False,
-            batch_size=1,
-        )
-    # ≥ 14 GB
     return BehaviourProfile(
-        max_image_resolution=1024,
-        max_video_frames=24,
-        max_controlnets=2,
-        ip_adapter_allowed=True,
-        auto_unload_after_gen=False,
+        max_image_resolution=res,
+        max_video_frames=frames,
+        max_controlnets=cn,
+        ip_adapter_allowed=(cn > 0),
+        auto_unload_after_gen=(mode == _MODE_KAGGLE),
         batch_size=1,
     )

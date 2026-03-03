@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://python.org)
 [![Diffusers](https://img.shields.io/badge/Diffusers-0.24%2B-orange)](https://github.com/huggingface/diffusers)
-[![Tests](https://img.shields.io/badge/Tests-199%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/Tests-227%20passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/License-MIT-green)](#license)
 
 ---
@@ -67,10 +67,10 @@ Intent → SceneDesigner → PromptCompiler → Isolated Engine → ModelLifecyc
 - **🤖 GenerationManager Orchestration** — All modalities flow through a single orchestrator; engines are instantiated, run, and destroyed per-request — no engine shares state with another
 - **🧠 Dual LLM Mode** — LLM-enhanced prompts (Gemini/OpenAI/Ollama) with automatic rule-based fallback; zero config required for offline use
 - **👤 Persistent Character Identity** — 512-d ArcFace face embeddings via InsightFace, stored persistently and injected for frame-consistent characters
-- **🌍 Adaptive Execution** — Auto-detects Kaggle, GPU VRAM tier, DirectML (AMD on Windows), and CI environments
+- **🌍 Adaptive Execution** — Auto-detects Kaggle, GPU VRAM tier, DirectML (AMD on Windows), and CI environments; supports `performance_mode` (speed/quality/balanced) toggles
 - **📊 Generation Metrics** — Per-run structured metrics (latency, VRAM usage, seed) stored as JSON
 - **🖥️ Streamlit UI** — Full browser-based UI with modality selector and real-time capability report
-- **✅ 199 Tests Passing** — Comprehensive test coverage across all modules without requiring GPU or network
+- **✅ 227 Tests Passing** — Comprehensive test coverage across all modules without requiring GPU or network
 
 ---
 
@@ -685,6 +685,9 @@ GenerationManager.generate_video(VideoGenerationRequest)
 | Local | CUDA | 7–13 GB | 768px | 16 | ❌ |
 | Local | CUDA | ≥ 14 GB | 1024px | 24 | ❌ |
 | Production | Any | Any | 2048px | 48 | ❌ |
+| CI | Any | — | 512px | 8 | ❌ |
+
+> **🚀 Performance Mode**: Use `performance_mode=max-speed` to prioritize latency (caps resolution at 512px) or `max-quality` to push hardware limits (boosts resolution/frames by ~25% on high-end tiers).
 
 > **Mode drift protection**: if `settings.mode=production` but platform is Kaggle, MGOS logs a `⚠ MODE DRIFT DETECTED` warning — production memory policies cause OOM on Kaggle.
 
@@ -702,6 +705,7 @@ output_dir: multigen_outputs
 log_level: INFO
 log_mode: pretty    # pretty | json
 device: auto        # auto | cuda | directml | cpu
+performance_mode: balanced      # balanced | max-speed | max-quality
 
 model_registry:
   lazy_load: true
@@ -731,8 +735,8 @@ sdxl:
   vae_float32: false      # false = pure fp16, no dtype mismatch
   num_inference_steps: 50
   guidance_scale: 7.5
-  default_width: 1024     # Phase 7 default (SDXL native resolution)
-  default_height: 1024
+  default_width: 768       # Kaggle-safe default resolution (drops VRAM ~30% vs 1024)
+  default_height: 768
 ```
 
 ---
@@ -749,6 +753,7 @@ sdxl:
 | `MGOS_LLM_API_MODE` | API provider | `gemini` / `openai` |
 | `MGOS_LLM_MODEL` | Model name | `gemini-1.5-flash` |
 | `MGOS_LLM_API_KEY` | API key | `sk-...` |
+| `MGOS_PERFORMANCE_MODE` | Speed/Quality toggle | `max-speed` / `max-quality` |
 | `MGOS_SDXL_USE_REFINER` | Enable SDXL refiner | `true` / `false` |
 
 ---
@@ -847,7 +852,7 @@ vid_result = manager.generate_video(VideoGenerationRequest(
 ## Running Tests
 
 ```bash
-# Run all 199 tests
+# Run all 227 tests
 pytest tests/ -v
 
 # Individual suites
