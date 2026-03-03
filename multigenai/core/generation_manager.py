@@ -48,32 +48,45 @@ class GenerationManager:
         """
         Orchestrates SVD-XT video generation.
 
-        If no conditioning_image_path is provided, this first invokes
-        the ImageEngine (SDXL) to securely generate a single conditioning frame,
-        unloads SDXL, and then strictly boots the VideoEngine (SVD-XT).
+        Architecture contract (Phase 7):
+        - The video prompt ALWAYS passes through SceneDesigner → PromptCompiler
+          regardless of whether a conditioning image is provided externally.
+        - If no conditioning_image_path is given, ImageEngine runs first (SDXL),
+          is fully unloaded, then VideoEngine (SVD-XT) boots.
+        - No diffusion model is ever in VRAM during another engine's run.
         """
         import torch
+
+        # ------------------------------------------------------------------
+        # Creative layer: process video prompt ALWAYS — before any engine boots
+        # ------------------------------------------------------------------
+        from multigenai.creative.scene_designer import SceneDesigner
+        from multigenai.creative.prompt_compiler import PromptCompiler
+
+        video_blueprint  = SceneDesigner().design_video(request)
+        compiled_vid_pos, compiled_vid_neg = PromptCompiler().compile(
+            video_blueprint, model_name="svd-xt"
+        )
+        LOG.info(f"GenerationManager: Video creative layer compiled prompt.")
 
         # -------------------------------------------------------------
         # STEP 1: Generate Conditioning Frame (if needed)
         # -------------------------------------------------------------
         if not conditioning_image_path:
             LOG.info("GenerationManager: No conditioning image provided. Booting ImageEngine...")
-            from multigenai.engines.image_engine.engine import ImageEngine
+            from multigenai.engines.image_engine.engine import ImageEngine  # bypasses ModelRegistry (Phase 7)
             from multigenai.llm.schema_validator import ImageGenerationRequest
 
             image_req = ImageGenerationRequest(
                 prompt=request.prompt,
                 negative_prompt=request.negative_prompt,
+                # Hard-override resolution to match video dimensions
+                # prevents resize distortion and composition drift in SVD-XT
                 width=request.width,
                 height=request.height,
                 seed=request.seed,
-                # identity parameters will use defaults
             )
 
-            from multigenai.creative.scene_designer import SceneDesigner
-            from multigenai.creative.prompt_compiler import PromptCompiler
-            
             scene = SceneDesigner().design(image_req)
             compiled_pos, compiled_neg = PromptCompiler().compile(scene, image_req.model_name)
 
@@ -81,6 +94,7 @@ class GenerationManager:
             original_unload = self._ctx.behaviour.auto_unload_after_gen
             self._ctx.behaviour.auto_unload_after_gen = True
 
+            image_engine = None
             try:
                 image_engine = ImageEngine(self._ctx)
                 img_result = image_engine.run(compiled_pos, compiled_neg, image_req)
@@ -95,7 +109,7 @@ class GenerationManager:
 
             finally:
                 self._ctx.behaviour.auto_unload_after_gen = original_unload
-                
+
                 # Absolute safety flush before booting SVD-XT
                 from multigenai.core.model_lifecycle import ModelLifecycle
                 ModelLifecycle.safe_unload(image_engine)
@@ -104,8 +118,9 @@ class GenerationManager:
         # STEP 2: Generate Video via VideoEngine (SVD-XT)
         # -------------------------------------------------------------
         LOG.info("GenerationManager: Booting isolated VideoEngine (SVD-XT)...")
-        from multigenai.engines.video_engine.engine import VideoEngine
-        
+        from multigenai.engines.video_engine.engine import VideoEngine  # bypasses ModelRegistry (Phase 7)
+
+        video_engine = None
         try:
             video_engine = VideoEngine(self._ctx)
             video_result = video_engine.generate(request, conditioning_image_path)
@@ -113,6 +128,7 @@ class GenerationManager:
         finally:
             from multigenai.core.model_lifecycle import ModelLifecycle
             ModelLifecycle.safe_unload(video_engine)
+
 
     def generate_image(self, request: "ImageGenerationRequest") -> "ImageResult":
         """Orchestrates SDXL image generation with strict lifecycle."""

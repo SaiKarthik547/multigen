@@ -61,7 +61,8 @@ class VideoEngine:
 
     def _load_model(self) -> None:
         """
-        Lazily loads SVD-XT directly, circumventing the ModelRegistry.
+        Lazily loads SVD-XT directly.
+        Diffusion models bypass ModelRegistry by design (Phase 7 isolation model).
         Uses sequential CPU offloading to prevent extreme memory spikes.
         """
         import torch
@@ -77,10 +78,13 @@ class VideoEngine:
             torch_dtype=torch.float16,
             variant="fp16"
         )
-        
-        # Kaggle Safe: Sequential offload is far more stable for SVD-XT than model offload
+
+        # Memory optimizations:
+        #   sequential_cpu_offload: UNet/VAE/image_encoder move to GPU only when used
+        #   enable_vae_tiling:      decodes frames in tiles — ~60% less VRAM peak
         if self.device == "cuda":
             self.pipe.enable_sequential_cpu_offload()
+            self.pipe.enable_vae_tiling()
         else:
             self.pipe = self.pipe.to(self.device)
 
@@ -112,8 +116,11 @@ class VideoEngine:
         """
         import torch
 
-        seed = request.seed if request.seed is not None else torch.randint(0, 1_000_000, (1,)).item()
-        generator = torch.Generator(device=self.device).manual_seed(seed)
+        seed = request.seed if request.seed is not None else int(
+            torch.randint(0, 1_000_000, (1,)).item()
+        )
+        # CPU generator: portable across CUDA/CPU/DirectML, same sequence guaranteed
+        generator = torch.Generator(device="cpu").manual_seed(seed)
         
         # Map Phase 5 temporal_strength (0.0 to 1.0) to native SVD motion_bucket_id (0 to 255)
         motion_bucket = int(request.temporal_strength * 255)
@@ -167,23 +174,30 @@ class VideoEngine:
         ]
 
         try:
-            process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-            
+            process = subprocess.Popen(
+                command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+
+            # Build the entire stdin buffer first then communicate() drains all
+            # pipes safely — avoids deadlock from simultaneous write + stderr fill.
+            stdin_buffer = b""
             for frame in frames:
-                # Convert PIL to uint8 RGB buffer and write to pipe
-                process.stdin.write(np.array(frame).astype(np.uint8).tobytes())
-                
-            process.stdin.close()
-            process.wait()
+                stdin_buffer += np.array(frame).astype(np.uint8).tobytes()
+
+            _stdout, stderr_bytes = process.communicate(input=stdin_buffer)
 
             if process.returncode != 0:
-                stderr_output = process.stderr.read().decode()
-                raise RuntimeError(f"FFmpeg encoding failed (code {process.returncode}):\n{stderr_output}")
-                
+                raise RuntimeError(
+                    f"FFmpeg encoding failed (code {process.returncode}):\n"
+                    f"{stderr_bytes.decode(errors='replace')}"
+                )
+
         except FileNotFoundError:
             raise RuntimeError("ffmpeg is not installed or not in system PATH.")
+        except RuntimeError:
+            raise
         except Exception as exc:
-            raise RuntimeError(f"Video encoding failed: {exc}")
+            raise RuntimeError(f"Video encoding failed: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Public interface (invoked ONLY by GenerationManager in Phase 6)
@@ -216,12 +230,18 @@ class VideoEngine:
             
             # 3. SVD-XT Latent Generation
             frames = self._generate_video(request, init_image)
-            
+
+            # Release conditioning image — no longer needed after generation
+            del init_image
+
             # 4. ffmpeg byte-pipe encoding
             self._encode_video(frames, str(out_path), request.fps)
 
+            # Release frame list before model unload to minimise peak memory
+            del frames
+
         except Exception as exc:
-            LOG.error(f"SVD Video engine error: {exc}")
+            LOG.error(f"SVD Video engine error: {exc}", exc_info=True)
             return VideoResult(path="", frame_count=0, fps=request.fps, seed=seed, success=False, error=str(exc))
         finally:
             # 5. Strict Model Unload (MUST run even if Generation crashes)

@@ -53,6 +53,8 @@ class ImageGenerationRequest(BaseModel):
     width: int = Field(default=1024, ge=64, le=4096)
     height: int = Field(default=1024, ge=64, le=4096)
     seed: Optional[int] = 42
+    num_inference_steps: int = Field(default=30, ge=10, le=100,
+                                      description="Denoising steps for base (and refiner) pass.")
 
     # --- Phase 4 / 6 backward compatibility ---
     character_id: Optional[str] = None
@@ -77,14 +79,18 @@ class ImageGenerationRequest(BaseModel):
 
 
 class VideoGenerationRequest(BaseModel):
-    """Validated request for the Video Engine."""
+    """Validated request for the VideoEngine (Phase 6 SVD-XT)."""
     prompt: str = Field(..., min_length=3)
     negative_prompt: str = ""
     character_id: Optional[str] = None
     scene_id: Optional[str] = None
     style_id: Optional[str] = None
     num_frames: int = Field(default=16, ge=4, le=60)
-    frame_duration: float = Field(default=0.5, ge=0.1)
+    frame_duration: float = Field(
+        default=0.5, ge=0.1,
+        description="Per-frame duration hint (seconds). Not used by SVD-XT directly; "
+                    "output timing is controlled by fps. Reserved for Phase 10 audio sync."
+    )
     fps: int = Field(default=8, ge=4, le=60)
     width: int = Field(default=1024, ge=256, le=1920)
     height: int = Field(default=576, ge=256, le=1080)
@@ -93,11 +99,11 @@ class VideoGenerationRequest(BaseModel):
         default=0.55, ge=0.0, le=1.0,
         description="Cosine similarity threshold for identity drift enforcement (Phase 5). 0.55 = enforced; was 0.85 advisory in Phase 4."
     )
-    # --- Phase 4: Identity conditioning (propagated to every frame) ---
+    # --- Identity: stored + drift-tracked, latent conditioning planned Phase 9 ---
     identity_name: Optional[str] = None
     identity_strength: float = Field(
         default=0.8, ge=0.0, le=1.5,
-        description="IP-Adapter conditioning strength propagated to each frame."
+        description="Reserved for Phase 9 latent identity conditioning. Currently advisory only."
     )
     # --- Phase 5: Temporal engine (now mapped to SVD-XT motion_bucket_id) ---
     temporal_strength: float = Field(

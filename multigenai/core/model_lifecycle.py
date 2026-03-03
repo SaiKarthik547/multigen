@@ -1,41 +1,67 @@
 """
-ModelLifecycle Helper
+ModelLifecycle — Centralized GPU/RAM teardown helper.
 
-Centralizes safe memory unloading logic for all generative engines,
-ensuring consistent VRAM reclamation (e.g., handling garbage collection,
-CUDA cache clearing, and IPC handle cleanup) to prevent memory fragmentation
-across the application.
+All engines call ModelLifecycle.safe_unload() in their finally blocks.
+This prevents VRAM leaks, memory fragmentation, and IPC handle exhaustion
+across sequential generations on resource-constrained hardware (Kaggle T4, etc).
+
+Teardown sequence (in order):
+  1. del obj                  — remove Python reference → cpython refcount hits 0
+  2. gc.collect()             — force sweep of any circular-ref survivors
+  3. cuda.empty_cache()       — return freed VRAM blocks to the CUDA allocator pool
+  4. cuda.ipc_collect()       — reclaim IPC memory handles (prevents handle leak
+                                when engines run in separate processes/subproceses)
 """
 
 from __future__ import annotations
 
 import gc
 
+from multigenai.core.logging.logger import get_logger
+
+LOG = get_logger(__name__)
+
+
 class ModelLifecycle:
-    """
-    Centralized model lifecycle handler for safe unloading.
-    """
+    """Centralized model lifecycle handler for safe, logged unloading."""
 
     @staticmethod
     def safe_unload(obj: object) -> None:
         """
-        Safely deletes an object and forcefully clears VRAM/IPC handles.
-        All engines must use this helper when tearing down models.
+        Safely destroy a model object and aggressively reclaim GPU/host memory.
+
+        Safe to call with None (no-op).
+        Safe to call multiple times on the same object (idempotent via None check).
+        Logs CUDA stats when DEBUG level is active.
+
+        Args:
+            obj: Any object (diffusers pipeline, torch module, etc.) or None.
         """
         if obj is None:
             return
 
+        obj_name = type(obj).__name__
+        LOG.debug(f"ModelLifecycle: unloading {obj_name}...")
+
         try:
             del obj
-        except Exception:
-            pass
+        except Exception as exc:
+            LOG.warning(f"ModelLifecycle: error deleting {obj_name}: {exc}")
 
         gc.collect()
 
         try:
             import torch
             if torch.cuda.is_available():
+                before_mb = torch.cuda.memory_reserved() / 1024 / 1024
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
+                after_mb = torch.cuda.memory_reserved() / 1024 / 1024
+                LOG.debug(
+                    f"ModelLifecycle: VRAM reclaimed from {obj_name} — "
+                    f"{before_mb:.0f}MB → {after_mb:.0f}MB reserved"
+                )
         except ImportError:
-            pass
+            pass  # torch not installed — normal in CI/test environments
+        except Exception as exc:
+            LOG.warning(f"ModelLifecycle: CUDA flush error after {obj_name}: {exc}")

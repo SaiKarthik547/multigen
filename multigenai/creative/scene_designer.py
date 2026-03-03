@@ -1,14 +1,40 @@
 """
-Scene Designer - Phase 7 Creative Layer
+Scene Designer — Phase 7 Creative Layer
 
-Converts user intent into a structured scene blueprint.
-Abstracts the creative definition away from the diffusion logic.
+Converts user intent into a structured SceneBlueprint.
+Isolates creative decisions from the diffusion engine.
+
+Boundary contract (enforced by PromptCompiler)
+----------------------------------------------
+SceneDesigner MAY add:
+  - Semantic subject descriptors
+  - Environment/context words
+  - Camera and lighting descriptions
+  - Atmosphere/mood words
+
+SceneDesigner MUST NOT add:
+  - Quality tokens (8k, masterpiece, ultra-detailed, sharp focus)
+  - Model-specific tuning tokens
+  - Negative prompt content
+
+Quality tokens are PromptCompiler's exclusive responsibility.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from pydantic import BaseModel
 from multigenai.llm.schema_validator import ImageGenerationRequest
 
+if TYPE_CHECKING:
+    from multigenai.llm.schema_validator import VideoGenerationRequest
+
+
 class SceneBlueprint(BaseModel):
+    """
+    Structured scene description produced by SceneDesigner.
+    All fields are semantic — no quality tokens allowed in subject.
+    """
     subject: str
     character_details: str
     environment: str
@@ -17,35 +43,103 @@ class SceneBlueprint(BaseModel):
     camera_description: str
     rendering_style: str
 
+
+# ---------------------------------------------------------------------------
+# Style → lighting/atmosphere expansion table
+# Must NOT include quality tokens — only semantic descriptors
+# ---------------------------------------------------------------------------
+_STYLE_MAP = {
+    "cinematic":       ("dramatic directional lighting, volumetric shadows", "cinematic mood"),
+    "photorealistic":  ("natural soft lighting, ambient occlusion", "realistic atmosphere"),
+    "anime":           ("flat cel shading, bright highlights", "vibrant anime mood"),
+    "watercolor":      ("diffuse soft lighting, pastel tones", "painterly atmosphere"),
+    "sketch":          ("high-contrast line lighting", "artistic sketch atmosphere"),
+    "dark-fantasy":    ("deep chiaroscuro lighting, rim light", "dark foreboding mood"),
+    "sci-fi":          ("neon glow, blue-tinted ambient light", "futuristic atmosphere"),
+}
+
+_DEFAULT_LIGHTING  = "volumetric lighting, dramatic shadows"
+_DEFAULT_ATMOSPHERE = "cinematic mood"
+
+
 class SceneDesigner:
     """
-    Translates raw generation requests into a semantic blueprint
-    by expanding style and camera presets, scaling environmental details,
-    and isolating creative concerns from the diffusion engine.
+    Translates raw generation requests into a semantic SceneBlueprint.
+
+    Expands style/camera presets and scales environmental detail.
+    Does NOT inject quality tokens (8k, masterpiece, etc.) — that is
+    strictly PromptCompiler's responsibility.
     """
 
     def design(self, request: ImageGenerationRequest) -> SceneBlueprint:
-        cam_desc = request.camera if request.camera else "cinematic medium shot"
-        
-        # Scale environment richness based on detail level
-        if request.environment_detail_level >= 0.8:
-            detail_words = "intricate, extremely detailed, highly complex, rich background"
-        elif request.environment_detail_level <= 0.3:
-            detail_words = "clean, focused, minimalist background, blank space"
+        """
+        Convert an ImageGenerationRequest into a SceneBlueprint.
+
+        Args:
+            request: Validated ImageGenerationRequest from schema_validator.
+
+        Returns:
+            SceneBlueprint with semantic fields populated.
+        """
+        # Camera
+        cam_desc = (request.camera or "medium shot").strip()
+
+        # Environment detail level → descriptive words
+        detail_level = request.environment_detail_level
+        if detail_level >= 0.8:
+            detail_words = "intricate, highly detailed, rich background"
+        elif detail_level <= 0.3:
+            detail_words = "clean, focused, minimalist background"
         else:
             detail_words = "detailed background"
 
-        # Expand basic style into descriptive lighting and atmosphere
-        lighting = "volumetric lighting, dramatic shadows"
-        atm = "cinematic mood"
-        style = request.style if request.style else "photorealistic masterpiece"
+        # Style → lighting + atmosphere (NO quality tokens)
+        style_key = (request.style or "cinematic").lower().strip()
+        lighting, atmosphere = _STYLE_MAP.get(
+            style_key, (_DEFAULT_LIGHTING, _DEFAULT_ATMOSPHERE)
+        )
+
+        # rendering_style carries the style name — semantic only, no quality tokens
+        rendering_style = style_key  # e.g. "cinematic", "anime" — not "masterpiece"
 
         return SceneBlueprint(
-            subject=request.prompt,
-            character_details="",  # Phase 8 identity features hook
+            subject=request.prompt,          # raw user prompt — no tokens added here
+            character_details="",            # Phase 9: identity hook
             environment=f"{detail_words} environment",
             lighting=lighting,
-            atmosphere=atm,
+            atmosphere=atmosphere,
             camera_description=cam_desc,
-            rendering_style=style
+            rendering_style=rendering_style,
         )
+
+    def design_video(self, request: "VideoGenerationRequest") -> SceneBlueprint:
+        """
+        Produce a motion-aware SceneBlueprint from a VideoGenerationRequest.
+
+        Used by GenerationManager to run the video's own prompt through the
+        creative layer, regardless of whether a conditioning image is provided.
+        Temporal lighting and motion phrasing are injected here (semantic only).
+
+        Args:
+            request: Validated VideoGenerationRequest.
+
+        Returns:
+            SceneBlueprint tuned for temporal/video generation.
+        """
+        # Video-specific atmosphere enrichment
+        motion = request.motion_hint.strip() if request.motion_hint else ""
+        lighting = "continuous natural lighting, soft temporal shadows"
+        atmosphere = f"fluid motion, temporal coherence"
+        if motion:
+            atmosphere = f"{atmosphere}, {motion}"
+
+        return SceneBlueprint(
+            subject=request.prompt,      # raw prompt — quality tokens added by PromptCompiler
+            character_details="",        # Phase 9: identity hook
+            environment="dynamic environment with motion",
+            lighting=lighting,
+            atmosphere=atmosphere,
+            camera_description="cinematic medium shot",
+            rendering_style="cinematic",
+        )
+
