@@ -108,9 +108,19 @@ class VideoEngine:
         except Exception as exc:
             LOG.warning(f"Error flushing CUDA memory: {exc}")
 
-    def _generate_video(self, request: "VideoGenerationRequest", conditioning_image: "PILImage", seed: int) -> List["PILImage"]:
+    def _generate_video(
+        self,
+        request: "VideoGenerationRequest",
+        conditioning_image: "PILImage",
+        seed: int,
+        num_frames: int,
+    ) -> List["PILImage"]:
         """
         Executes the SVD-XT forward pass, returning a list of PIL Images.
+
+        Args:
+            num_frames: Effective frame count to generate. Passed explicitly
+                        so that request.num_frames is never mutated.
         """
         import torch
 
@@ -122,14 +132,14 @@ class VideoEngine:
         motion_bucket = max(0, min(255, int(request.temporal_strength * 255)))
         
         LOG.info(
-            f"Phase 6: Generating {request.num_frames} frames via SVD-XT. "
+            f"Phase 6: Generating {num_frames} frames via SVD-XT. "
             f"Seed={seed}, resolution={request.width}x{request.height}, "
             f"steps={request.num_inference_steps}, motion_bucket_id={motion_bucket}."
         )
 
         frames = self.pipe(
             image=conditioning_image,
-            num_frames=request.num_frames,
+            num_frames=num_frames,          # explicit param — never from request
             num_inference_steps=request.num_inference_steps,
             height=request.height,
             width=request.width,
@@ -142,61 +152,77 @@ class VideoEngine:
 
     def _encode_video(self, frames: List["PILImage"], path: str, fps: int) -> None:
         """
-        Pipes raw RGB24 frames securely into an ffmpeg subprocess.
-        Bypasses `moviepy` entirely for zero-overhead, production-grade speeds.
+        Stream raw RGB24 frames into ffmpeg via stdin and encode to H.264 mp4.
+
+        Correct subprocess lifecycle:
+          1. Write all frames to stdin (streaming, no bulk buffer)
+          2. Close stdin (signals EOF — ffmpeg begins muxing)
+          3. Wait for process exit (process state is now stable)
+          4. Read stderr (safe after wait — no race with pipe close)
+          5. Check return code
+
+        Ordering matters: wait() FIRST, stderr.read() AFTER.
+        Reading stderr before wait() can race with ultrafast ffmpeg exit on Kaggle,
+        causing a flush-of-closed-file ValueError on stdin pipe internals.
+        Never call communicate() after manual stdin writes.
         """
+        import numpy as np
+
         if not frames:
             raise ValueError("No frames provided for encoding.")
 
         width, height = frames[0].size
-        
-        LOG.info(f"Encoding {len(frames)} frames to H.264 mp4 via ffmpeg pipe...")
-        
-        command = [
+
+        LOG.info(f"Encoding {len(frames)} frames ({width}x{height}) to H.264 mp4 via ffmpeg...")
+
+        cmd = [
             "ffmpeg",
-            "-y",                  # overwrite output
+            "-y",                   # overwrite output
             "-f", "rawvideo",
             "-vcodec", "rawvideo",
             "-pix_fmt", "rgb24",
             "-s", f"{width}x{height}",
             "-r", str(fps),
-            "-i", "-",             # read from stdin
-            "-an",                 # no audio
+            "-i", "-",              # read from stdin
+            "-an",                  # no audio track
             "-vcodec", "libx264",
             "-preset", "ultrafast",
             "-pix_fmt", "yuv420p",
-            path
+            path,
         ]
 
         try:
             process = subprocess.Popen(
-                command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+                cmd,
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
+        except FileNotFoundError:
+            raise RuntimeError("ffmpeg is not installed or not in system PATH.")
 
-            # Stream frames one-by-one to avoid peak allocation of
-            # frames × width × height × 3 bytes for 16+ frame runs.
-            import numpy as np
-            try:
-                for frame in frames:
-                    process.stdin.write(np.array(frame).astype(np.uint8).tobytes())
-                process.stdin.close()
-            except BrokenPipeError:
-                pass  # ffmpeg failure will be caught by returncode check below
+        try:
+            # Stream frames one-by-one: no peak allocation of frames × W × H × 3 bytes
+            for frame in frames:
+                process.stdin.write(np.asarray(frame, dtype=np.uint8).tobytes())
 
-            _, stderr_bytes = process.communicate()
+            process.stdin.close()         # EOF signal — ffmpeg begins muxing
 
-            if process.returncode != 0:
+            return_code = process.wait()  # wait FIRST — process is fully stable after this
+            stderr_bytes = process.stderr.read()  # read AFTER wait — no pipe race
+
+            if return_code != 0:
                 raise RuntimeError(
-                    f"FFmpeg encoding failed (code {process.returncode}):\n"
+                    f"FFmpeg encoding failed (code {return_code}):\n"
                     f"{stderr_bytes.decode(errors='replace')}"
                 )
 
-        except FileNotFoundError:
-            raise RuntimeError("ffmpeg is not installed or not in system PATH.")
         except RuntimeError:
             raise
         except Exception as exc:
+            process.kill()
+            process.wait()
             raise RuntimeError(f"Video encoding failed: {exc}") from exc
+
 
     # ------------------------------------------------------------------
     # Public interface (invoked ONLY by GenerationManager in Phase 6)
@@ -245,12 +271,9 @@ class VideoEngine:
             # 3. Strict Model Loading
             self._load_model()
             
-            # 4. SVD-XT Latent Generation (pass effective_frames, not request.num_frames)
-            # We pass effective_frames via a local — request object is NOT mutated.
-            original_frames = request.num_frames
-            request.num_frames = effective_frames
-            frames = self._generate_video(request, init_image, seed)
-            request.num_frames = original_frames  # always restore
+            # 4. SVD-XT Latent Generation — effective_frames passed as explicit param
+            # request.num_frames is NEVER mutated; clean separation of intent vs execution.
+            frames = self._generate_video(request, init_image, seed, effective_frames)
 
             # Release conditioning image — no longer needed after generation
             del init_image

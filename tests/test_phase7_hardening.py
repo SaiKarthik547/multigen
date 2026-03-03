@@ -269,18 +269,39 @@ class TestPromptBoundaryEnforcement:
 
 
 # ---------------------------------------------------------------------------
-# 7. FFmpeg: communicate() ensures no deadlock (contract test)
+# 7. FFmpeg: correct streaming lifecycle (no communicate() after stdin.close)
 # ---------------------------------------------------------------------------
 
 class TestFFmpegCommunicateContract:
-    def test_encode_video_uses_communicate_not_wait(self):
+    def test_encode_video_uses_correct_streaming_lifecycle(self):
         """
-        VideoEngine._encode_video must use process.communicate() instead of
-        process.wait() to avoid deadlock on large frame buffers.
+        VideoEngine._encode_video must use the correct streaming lifecycle:
+          write frames → stdin.close() → wait() → stderr.read() → check returncode
+
+        Ordering: wait() FIRST, stderr.read() AFTER.
+        Reading stderr before wait() races with ultrafast ffmpeg exit on Kaggle
+        causing flush-of-closed-file ValueError on stdin pipe internals.
         """
         import inspect
         from multigenai.engines.video_engine.engine import VideoEngine
         source = inspect.getsource(VideoEngine._encode_video)
-        assert "communicate(" in source, "_encode_video must use process.communicate()"
-        assert "process.wait()" not in source, "process.wait() causes deadlock — must not be present"
-        assert "stderr.read()" not in source, "stderr.read() after wait() causes deadlock"
+
+        assert "stdin.close()" in source, "must close stdin to signal EOF"
+        assert "process.wait()" in source, "must call wait() to let ffmpeg finish"
+        assert "stderr.read()" in source, "must read stderr for error diagnostics"
+        assert "process.communicate()" not in source, \
+            "communicate() must NOT be used after manual stdin writes"
+
+        # Enforce ordering: wait() must appear BEFORE stderr.read() in source
+        wait_pos = source.index("process.wait()")
+        stderr_pos = source.index("process.stderr.read()")
+        assert wait_pos < stderr_pos, \
+            "process.wait() must come BEFORE stderr.read() to avoid race on fast ffmpeg exit"
+
+    def test_generate_video_accepts_explicit_num_frames_param(self):
+        """_generate_video must accept num_frames as an explicit parameter (not read from request)."""
+        import inspect
+        from multigenai.engines.video_engine.engine import VideoEngine
+        sig = inspect.signature(VideoEngine._generate_video)
+        assert "num_frames" in sig.parameters, \
+            "_generate_video must accept num_frames explicitly to avoid request mutation"
