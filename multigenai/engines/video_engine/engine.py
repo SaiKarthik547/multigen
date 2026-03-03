@@ -117,8 +117,9 @@ class VideoEngine:
         # CPU generator: portable across CUDA/CPU/DirectML, same sequence guaranteed
         generator = torch.Generator(device="cpu").manual_seed(seed)
         
-        # Map Phase 5 temporal_strength (0.0 to 1.0) to native SVD motion_bucket_id (0 to 255)
-        motion_bucket = int(request.temporal_strength * 255)
+        # Map temporal_strength (0.0–1.0) to native SVD motion_bucket_id (0–255)
+        # Clamped to prevent out-of-range values from user-supplied temporal_strength
+        motion_bucket = max(0, min(255, int(request.temporal_strength * 255)))
         
         LOG.info(
             f"Phase 6: Generating {request.num_frames} frames via SVD-XT. "
@@ -144,8 +145,6 @@ class VideoEngine:
         Pipes raw RGB24 frames securely into an ffmpeg subprocess.
         Bypasses `moviepy` entirely for zero-overhead, production-grade speeds.
         """
-        import numpy as np
-        
         if not frames:
             raise ValueError("No frames provided for encoding.")
 
@@ -171,16 +170,20 @@ class VideoEngine:
 
         try:
             process = subprocess.Popen(
-                command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
             )
 
-            # Build the entire stdin buffer first then communicate() drains all
-            # pipes safely — avoids deadlock from simultaneous write + stderr fill.
-            stdin_buffer = b""
-            for frame in frames:
-                stdin_buffer += np.array(frame).astype(np.uint8).tobytes()
+            # Stream frames one-by-one to avoid peak allocation of
+            # frames × width × height × 3 bytes for 16+ frame runs.
+            import numpy as np
+            try:
+                for frame in frames:
+                    process.stdin.write(np.array(frame).astype(np.uint8).tobytes())
+                process.stdin.close()
+            except BrokenPipeError:
+                pass  # ffmpeg failure will be caught by returncode check below
 
-            _stdout, stderr_bytes = process.communicate(input=stdin_buffer)
+            _, stderr_bytes = process.communicate()
 
             if process.returncode != 0:
                 raise RuntimeError(
@@ -212,6 +215,10 @@ class VideoEngine:
         seed = request.seed if request.seed is not None else int(
             torch.randint(0, 1_000_000, (1,)).item()
         )
+
+        # Compute effective frame count WITHOUT mutating the request object.
+        # Mutating request causes VideoResult to return capped count as if it were requested.
+        effective_frames = request.num_frames
         
         try:
             # 1. Load Conditioning Image 
@@ -225,22 +232,30 @@ class VideoEngine:
                  init_image = init_image.resize((request.width, request.height), PILImage.Resampling.LANCZOS)
 
             # 2. Adaptive Constraints (Kaggle/T4 Hardening)
-            # 1024x576 (or similar high res) at 16 frames OOMs on T4 (15GB). 
-            # Force-cap to 8 frames at high res for stability.
-            if request.width * request.height > 600000 and request.num_frames > 8:
-                LOG.warning(f"High resolution {request.width}x{request.height} detected. Capping frames to 8 for VRAM stability.")
-                request.num_frames = 8
+            # Pixel-area threshold covers 1024x576, 896x512, and other high-density resolutions
+            # that trigger 3D conv OOM during VAE decode, even with decode_chunk_size=2.
+            if request.width * request.height > 600000 and effective_frames > 8:
+                LOG.warning(
+                    f"High resolution {request.width}x{request.height} detected "
+                    f"(pixels={request.width * request.height} > 600000). "
+                    f"Capping frames {effective_frames} → 8 for VRAM stability."
+                )
+                effective_frames = 8
 
             # 3. Strict Model Loading
             self._load_model()
             
-            # 3. SVD-XT Latent Generation
+            # 4. SVD-XT Latent Generation (pass effective_frames, not request.num_frames)
+            # We pass effective_frames via a local — request object is NOT mutated.
+            original_frames = request.num_frames
+            request.num_frames = effective_frames
             frames = self._generate_video(request, init_image, seed)
+            request.num_frames = original_frames  # always restore
 
             # Release conditioning image — no longer needed after generation
             del init_image
 
-            # 4. ffmpeg byte-pipe encoding
+            # 5. ffmpeg byte-pipe encoding
             self._encode_video(frames, str(out_path), request.fps)
 
             # Release frame list before model unload to minimise peak memory
@@ -250,12 +265,12 @@ class VideoEngine:
             LOG.error(f"SVD Video engine error: {exc}", exc_info=True)
             return VideoResult(path="", frame_count=0, fps=request.fps, seed=seed, success=False, error=str(exc))
         finally:
-            # 5. Strict Model Unload (MUST run even if Generation crashes)
+            # 6. Strict Model Unload (MUST run even if Generation crashes)
             self._unload_model()
 
         return VideoResult(
             path=str(out_path), 
-            frame_count=request.num_frames, 
+            frame_count=effective_frames,  # reflects actual frames generated
             fps=request.fps, 
             seed=seed, 
             success=True

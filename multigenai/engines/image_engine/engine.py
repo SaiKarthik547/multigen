@@ -128,24 +128,39 @@ class ImageEngine:
 
     def _load_model(self, model_name: str) -> None:
         """
-        Loads the SDXL base model with all memory optimizations applied.
+        Loads the base diffusion model with memory optimizations applied.
 
-        Memory profile (CUDA, 1024x1024):
+        Auto-detects the correct pipeline class from the repo id:
+          - SDXL repos → StableDiffusionXLPipeline (fp16 variant)
+          - SD 1.x repos → StableDiffusionPipeline (no variant kwarg)
+
+        Memory profile (CUDA, SDXL 1024x1024):
           Naive load:       ~11GB VRAM
           After this:       ~4-5GB VRAM  (sequential offload + tiling + slicing)
         """
         import torch
-        from diffusers import StableDiffusionXLPipeline
 
         repo_id = self._resolve_model_name(model_name)
-        LOG.info(f"Loading base model {repo_id} (fp16, all memory optimizations)...")
+        is_xl = "xl" in repo_id.lower()
 
-        self.pipe = StableDiffusionXLPipeline.from_pretrained(
-            repo_id,
-            torch_dtype=torch.float16,
-            variant="fp16",
-            use_safetensors=True,
-        )
+        if is_xl:
+            from diffusers import StableDiffusionXLPipeline
+            LOG.info(f"Loading SDXL model {repo_id} (fp16)...")
+            self.pipe = StableDiffusionXLPipeline.from_pretrained(
+                repo_id,
+                torch_dtype=torch.float16,
+                variant="fp16",
+                use_safetensors=True,
+            )
+        else:
+            from diffusers import StableDiffusionPipeline
+            LOG.info(f"Loading SD 1.x model {repo_id} (fp16)...")
+            self.pipe = StableDiffusionPipeline.from_pretrained(
+                repo_id,
+                torch_dtype=torch.float16,
+                use_safetensors=True,
+            )
+
         self.pipe = _apply_memory_optimizations(self.pipe, self.device)
 
     def _generate(
