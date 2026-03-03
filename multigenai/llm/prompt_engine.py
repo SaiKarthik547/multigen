@@ -100,16 +100,22 @@ class PromptEngine:
 
         # 1. Style injection
         style_fragment = ""
-        if request.style_id and self._style_registry:
-            profile = self._style_registry.get(request.style_id)
+        style = getattr(request, "style", None) or getattr(request, "style_id", None)
+        if style and self._style_registry:
+            profile = self._style_registry.get(style)
             if profile:
                 style_fragment = profile.to_prompt_fragment()
                 prompt = f"{prompt}, {style_fragment}" if style_fragment else prompt
 
-        # 2. Camera / lighting injection
-        cam = request.camera
-        lit = request.lighting
-        prompt = f"{prompt}, {cam.shot_type} shot, {cam.angle} angle, {lit.type} lighting"
+        # 2. Camera / lighting injection (camera is now a plain string in Phase 7)
+        cam = getattr(request, "camera", None)
+        if cam and isinstance(cam, str):
+            prompt = f"{prompt}, {cam} shot"
+        elif cam and hasattr(cam, "shot_type"):
+            lit = getattr(request, "lighting", None)
+            prompt = f"{prompt}, {cam.shot_type} shot, {cam.angle} angle" + (
+                f", {lit.type} lighting" if lit and hasattr(lit, "type") else ""
+            )
 
         # 3. Identity-aware token stripping (Phase 4)
         #    When identity conditioning is active, remove facial descriptor tokens
@@ -133,8 +139,9 @@ class PromptEngine:
             "wrong anatomy, extra limb, missing limb, floating limbs, "
             "mutated hands, blurry, low resolution, watermark, text, signature"
         )
-        if self._style_registry and request.style_id:
-            profile = self._style_registry.get(request.style_id)
+        eff_style = getattr(request, "style", None) or getattr(request, "style_id", None)
+        if self._style_registry and eff_style:
+            profile = self._style_registry.get(eff_style)
             if profile and profile.to_negative_fragment():
                 base_negative = f"{base_negative}, {profile.to_negative_fragment()}"
         negative = (
@@ -155,11 +162,9 @@ class PromptEngine:
             style_fragment=style_fragment,
             tokens_estimated=tokens_estimated,
             metadata={
-                "style_id": request.style_id,
-                "character_id": request.character_id,
-                "scene_id": request.scene_id,
-                "camera": cam.model_dump(),
-                "lighting": lit.model_dump(),
-                "identity_name": request.identity_name,
+                "style": getattr(request, "style", None) or getattr(request, "style_id", None),
+                "character_id": getattr(request, "character_id", None),
+                "scene_id": getattr(request, "scene_id", None),
+                "identity_name": getattr(request, "identity_name", None),
             },
         )

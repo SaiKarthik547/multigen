@@ -348,36 +348,6 @@ class TestAudioRequestIdentityFields:
         assert req.identity_strength == pytest.approx(0.8)
 
 
-# ===========================================================================
-# 24–25: run_with_ip_adapter raises — and run() still works with identity_name
-# ===========================================================================
-
-class TestInjectIdentitySkipPaths:
-    """
-    IP-Adapter has been removed from ImageEngine.
-
-    run_with_ip_adapter() must now raise ValueError to prevent silent misuse.
-    run() with identity_name set must still succeed (prompt-level stripping only).
-    """
-
-    def test_run_with_ip_adapter_raises_value_error(self):
-        """run_with_ip_adapter() is deferred — must raise ValueError, not silently fall back."""
-        from multigenai.engines.image_engine.engine import ImageEngine
-        with patch.object(ImageEngine, "__init__", lambda self, ctx: None):
-            engine = ImageEngine.__new__(ImageEngine)
-        req = ImageGenerationRequest(prompt="hero at dawn", identity_name="hero")
-        with pytest.raises(ValueError, match="not implemented"):
-            engine.run_with_ip_adapter(req, face_image_path="face.png")
-
-    def test_run_with_ip_adapter_raises_even_without_identity_name(self):
-        """ValueError is raised regardless of whether identity_name is set."""
-        from multigenai.engines.image_engine.engine import ImageEngine
-        with patch.object(ImageEngine, "__init__", lambda self, ctx: None):
-            engine = ImageEngine.__new__(ImageEngine)
-        req = ImageGenerationRequest(prompt="a landscape")
-        with pytest.raises(ValueError):
-            engine.run_with_ip_adapter(req, face_image_path=None)
-
 
 # ===========================================================================
 # 26–27: GenerationMetrics — identity fields

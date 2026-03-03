@@ -12,8 +12,6 @@ import pathlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-import torch
-
 from multigenai.core.logging.logger import get_logger
 from multigenai.core.model_lifecycle import ModelLifecycle
 
@@ -61,6 +59,7 @@ class ImageEngine:
 
     def _load_model(self, model_name: str) -> None:
         """Loads the SDXL base model with sequential CPU offloading."""
+        import torch
         from diffusers import StableDiffusionXLPipeline
         
         # Default to base model if simple name provided
@@ -82,6 +81,7 @@ class ImageEngine:
 
     def _generate(self, compiled_prompt: str, negative_prompt: str, request: "ImageGenerationRequest") -> "PILImage":
         """Executes the base generation pass."""
+        import torch
         seed = request.seed if request.seed is not None else torch.randint(0, 1_000_000, (1,)).item()
         generator = torch.Generator(device=self.device).manual_seed(seed)
 
