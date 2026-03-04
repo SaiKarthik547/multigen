@@ -13,9 +13,9 @@ from typing import Optional, Tuple
 
 LOG = logging.getLogger(__name__)
 
-# HuggingFace repo hosting the RIFE IFNet weights used here.
-# Using AlignedAI/RIFE which provides a clean inference-only checkpoint.
-RIFE_REPO_ID = "AlignedAI/RIFE"
+# HuggingFace repo hosting PyTorch RIFE IFNet weights.
+# AlexWortega/RIFE hosts flownet.pkl compatible with the inline IFNet architecture.
+RIFE_REPO_ID = "AlexWortega/RIFE"
 RIFE_WEIGHT_FILE = "flownet.pkl"
 
 
