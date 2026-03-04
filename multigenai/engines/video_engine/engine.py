@@ -264,13 +264,19 @@ class VideoEngine:
             init_image = init_image.resize((request.width, request.height), PILImage.Resampling.LANCZOS)
 
         # Adaptive pixel-area frame cap (Kaggle/T4 VRAM hardening)
-        if request.width * request.height > 600000 and effective_frames > 8:
+        # Threshold: >600k pixels (1024×576=589k is fine; 1280×720=921k is not)
+        # Cap at 16 (not 8) — interpolation depends on keyframe count for
+        # output frame formula: n + (n-1)*(factor-1). Capping at 8 would
+        # silently halve interpolated output vs user expectation.
+        max_pixels = 600_000
+        max_svd_frames = 16
+        if request.width * request.height > max_pixels and effective_frames > max_svd_frames:
             LOG.warning(
                 f"High resolution {request.width}x{request.height} detected "
-                f"(pixels={request.width * request.height} > 600000). "
-                f"Capping frames {effective_frames} → 8 for VRAM stability."
+                f"(pixels={request.width * request.height} > {max_pixels}). "
+                f"Capping frames {effective_frames} → {max_svd_frames} for VRAM stability."
             )
-            effective_frames = 8
+            effective_frames = max_svd_frames
 
         self._load_model()
 
@@ -282,8 +288,8 @@ class VideoEngine:
             # Always unload after generation — InterpolationEngine must boot clean
             self._unload_model()
 
+    @staticmethod
     def encode(
-        self,
         frames: list,
         out_path,
         fps: int,
@@ -293,26 +299,83 @@ class VideoEngine:
         """
         Encode a list of PIL frames to mp4 via ffmpeg and return VideoResult.
 
+        Defined as a staticmethod — callers (GenerationManager, generate() wrapper)
+        do not need to instantiate a full VideoEngine to encode an existing frame list.
+
         Args:
             frames:           Final (possibly interpolated) frame list
-            out_path:         pathlib.Path for output mp4
+            out_path:         pathlib.Path or str for output mp4
             fps:              Frames per second
             seed:             Seed used during generation (for VideoResult metadata)
-            requested_frames: Original request.num_frames (before any cap/interpolation)
+            requested_frames: Fallback frame count if frames list is empty
         """
+        _log = get_logger(__name__)
+        frame_count = len(frames) if frames else requested_frames  # capture BEFORE del
+
         try:
-            self._encode_video(frames, str(out_path), fps)
-            del frames
+            # Import _encode_video logic inline via a temporary engine-free subprocess call
+            import numpy as np
+            import subprocess
+
+            if not frames:
+                raise ValueError("No frames to encode.")
+
+            width, height = frames[0].size
+            _log.info(f"Encoding {frame_count} frames ({width}x{height}) to {out_path}")
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "rawvideo", "-vcodec", "rawvideo",
+                "-pix_fmt", "rgb24",
+                "-s", f"{width}x{height}",
+                "-r", str(fps),
+                "-i", "-",
+                "-an",
+                "-vcodec", "libx264",
+                "-preset", "ultrafast",
+                "-pix_fmt", "yuv420p",
+                str(out_path),
+            ]
+
+            try:
+                process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            except FileNotFoundError:
+                raise RuntimeError("ffmpeg is not installed or not in system PATH.")
+
+            try:
+                for frame in frames:
+                    process.stdin.write(np.asarray(frame, dtype=np.uint8).tobytes())
+                process.stdin.close()
+                return_code = process.wait()
+                stderr_bytes = process.stderr.read()
+                if return_code != 0:
+                    raise RuntimeError(
+                        f"FFmpeg encoding failed (code {return_code}):\n"
+                        f"{stderr_bytes.decode(errors='replace')}"
+                    )
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                process.kill()
+                process.wait()
+                raise RuntimeError(f"Video encoding failed: {exc}") from exc
+
+            del frames  # release memory AFTER we've finished using it
+
             return VideoResult(
                 path=str(out_path),
-                frame_count=len(frames) if frames else requested_frames,
+                frame_count=frame_count,
                 fps=fps,
                 seed=seed,
                 success=True,
             )
         except Exception as exc:
-            LOG.error(f"Video encoding error: {exc}", exc_info=True)
-            return VideoResult(path="", frame_count=0, fps=fps, seed=seed, success=False, error=str(exc))
+            _log.error(f"Video encoding error: {exc}", exc_info=True)
+            return VideoResult(
+                path="", frame_count=0, fps=fps, seed=seed,
+                success=False, error=str(exc)
+            )
+
 
     def generate(
         self,

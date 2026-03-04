@@ -114,7 +114,22 @@ class InterpolationEngine:
         import numpy as np
         from PIL import Image as PILImage
 
+        import math
         intermediates = []
+
+        # ----------------------------------------------------------------
+        # RIFE requires input dimensions to be multiples of 32.
+        # Pad to the next multiple, run inference, crop back to original.
+        # ----------------------------------------------------------------
+        orig_w, orig_h = f0.size
+        pad_w = math.ceil(orig_w / 32) * 32
+        pad_h = math.ceil(orig_h / 32) * 32
+
+        def pad_img(img: "PILImage") -> "PILImage":
+            if img.size == (pad_w, pad_h):
+                return img
+            # Use LANCZOS for quality — keeps edge pixels clean
+            return img.resize((pad_w, pad_h), PILImage.Resampling.LANCZOS)
 
         # Convert PIL → float32 tensor [1, C, H, W] in [0, 1]
         def to_tensor(img: "PILImage") -> "torch.Tensor":
@@ -124,14 +139,22 @@ class InterpolationEngine:
 
         def to_pil(t: "torch.Tensor") -> "PILImage":
             arr = (t.squeeze(0).permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255)
-            return PILImage.fromarray(arr.astype(np.uint8))
+            img = PILImage.fromarray(arr.astype(np.uint8))
+            # Crop back to original resolution after RIFE inference
+            if img.size != (orig_w, orig_h):
+                img = img.resize((orig_w, orig_h), PILImage.Resampling.LANCZOS)
+            return img
 
-        t0 = to_tensor(f0)
-        t1 = to_tensor(f1)
+        t0 = to_tensor(pad_img(f0))
+        t1 = to_tensor(pad_img(f1))
 
         for i in range(1, factor):
-            timestep = i / factor
-            x = torch.cat([t0, t1, torch.zeros_like(t0)], dim=1)
+            # t is the fractional timestep in (0, 1) for this intermediate frame.
+            # RIFE uses this to blend flow fields — without it every frame is identical.
+            t = i / factor
+            t_tensor = torch.full_like(t0[:, :1], t)  # [1, 1, H, W] filled with t
+
+            x = torch.cat([t0, t1, t_tensor], dim=1)  # [1, 7, H, W]
             with torch.no_grad():
                 mid = self._model(x)
             intermediates.append(to_pil(mid))

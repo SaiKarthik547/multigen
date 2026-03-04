@@ -171,10 +171,10 @@ def document(
     else:
         result = manager.generate_document(request)
 
-    if success:
-        console.print(f"[bold green]✔ Done![/bold green] Saved to: {path}")
+    if result.success:
+        console.print(f"[bold green]✔ Done![/bold green] Saved to: {result.path}")
     else:
-        console.print(f"[bold red]✘ Failed:[/bold red] {error}", err=True)
+        console.print(f"[bold red]✘ Failed:[/bold red] {result.error}", err=True)
         raise typer.Exit(code=1)
 
 

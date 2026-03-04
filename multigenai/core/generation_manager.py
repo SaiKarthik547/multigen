@@ -152,10 +152,11 @@ class GenerationManager:
 
         # -------------------------------------------------------------
         # STEP 4: Encode frames to mp4 via ffmpeg
+        # encode() is a @staticmethod — no VideoEngine instantiation needed
         # -------------------------------------------------------------
         LOG.info(f"GenerationManager: Encoding {len(frames)} frames to mp4...")
-        video_engine_enc = VideoEngine(self._ctx)
-        return video_engine_enc.encode(
+        from multigenai.engines.video_engine.engine import VideoEngine
+        return VideoEngine.encode(
             frames=frames,
             out_path=out_path,
             fps=request.fps,
