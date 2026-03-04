@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://python.org)
 [![Diffusers](https://img.shields.io/badge/Diffusers-0.24%2B-orange)](https://github.com/huggingface/diffusers)
-[![Tests](https://img.shields.io/badge/Tests-231%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/Tests-252%20passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/License-MIT-green)](#license)
 
 ---
@@ -71,7 +71,8 @@ Intent → SceneDesigner → PromptCompiler → Isolated Engine → ModelLifecyc
 - **🌍 Adaptive Execution** — Auto-detects Kaggle, GPU VRAM tier, DirectML (AMD on Windows), and CI environments; supports `performance_mode` (speed/quality/balanced) toggles
 - **📊 Generation Metrics** — Per-run structured metrics (latency, VRAM usage, seed) stored as JSON
 - **🖥️ Streamlit UI** — Full browser-based UI with modality selector and real-time capability report
-- **✅ 231 Tests Passing** — Comprehensive test coverage across all modules without requiring GPU or network
+- **⏱️ Phase 8 Temporal Enhancement** — `InterpolationEngine` (RIFE IFNet) inserts `(factor−1)` intermediate frames between each SVD keyframe pair; `16 frames × factor 2 → 31 frames`; lazy-loads and unloads independently of SVD; graceful pass-through if RIFE weights unavailable
+- **✅ 252 Tests Passing** — Comprehensive test coverage across all modules without requiring GPU or network
 
 ---
 
@@ -853,7 +854,7 @@ vid_result = manager.generate_video(VideoGenerationRequest(
 ## Running Tests
 
 ```bash
-# Run all 231 tests
+# Run all 252 tests
 pytest tests/ -v
 
 # Individual suites
@@ -879,6 +880,6 @@ pytest tests/test_compute_stability.py -v  # Metrics, registry, lifecycle (54 te
 | Phase 5 | ✅ Complete | Hard consistency enforcement: seed injection, embedding drift tracking, temporal coherence |
 | Phase 6 | ✅ Complete | **SVD-XT VideoEngine** (Hardened): single-pass Stable Video Diffusion, `decode_chunk_size=2`, adaptive frame cap, motion_bucket clamping, production-grade ffmpeg streaming |
 | Phase 7 | ✅ Complete | **Architecture Overhaul**: SceneDesigner, PromptCompiler, ModelLifecycle, GenerationManager as sole orchestrator, strict VRAM isolation |
-| Phase 8 | 🔜 Planned | Audio Engine: voice cloning (YourTTS/Bark), music generation (MusicGen), SFX synthesis |
+| Phase 8 | ✅ Complete | **Temporal Enhancement**: RIFE `InterpolationEngine`, frame expansion (`n + (n−1)×(factor−1)`), `interpolate`/`interpolation_factor` schema, strict lifecycle, graceful degradation |
 | Phase 9 | 🔜 Planned | ControlNet integration: depth, canny, pose control signals |
 | Phase 10 | 🔜 Planned | Multi-agent DAG orchestration: parallel scene generation, automatic scene assembly |

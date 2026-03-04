@@ -8,7 +8,7 @@ python-dotenv
 
 # Image, Video, and Text Processing
 Pillow
-moviepy
+# moviepy removed in Phase 6 (replaced by direct ffmpeg streaming pipe)
 nltk
 matplotlib
 

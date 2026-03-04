@@ -119,10 +119,28 @@ class VideoGenerationRequest(BaseModel):
         description="Denoising steps per frame. 25 is the native SVD-XT default."
     )
 
+    # --- Phase 8: Temporal Enhancement (RIFE interpolation) ---
+    interpolate: bool = Field(
+        default=True,
+        description="Enable RIFE frame interpolation after SVD generation to double/triple frame count."
+    )
+    interpolation_factor: int = Field(
+        default=2, ge=1, le=4,
+        description=(
+            "Frame multiplication factor. "
+            "Output frames = n + (n-1)*(factor-1). "
+            "Example: 16 frames * factor 2 → 31 frames."
+        )
+    )
+
     @model_validator(mode='after')
-    def validate_resolution(self):
+    def validate_request(self):
+        # Resolution must be divisible by 64 (SVD-XT requirement)
         if self.width % 64 != 0 or self.height % 64 != 0:
             raise ValueError(f"SVD requires dimensions divisible by 64. Got {self.width}x{self.height}")
+        # interpolation_factor must be 1 when interpolation is disabled
+        if not self.interpolate and self.interpolation_factor != 1:
+            raise ValueError("interpolation_factor must be 1 when interpolate=False")
         return self
 
 

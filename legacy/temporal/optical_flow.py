@@ -1,8 +1,9 @@
 """
-OpticalFlow — Phase 5 stub.
+OpticalFlow — Phase 5 stub (ARCHIVED to legacy/).
 
-Phase 5 will implement optical flow extraction (RAFT / DenseFlow)
-for temporal smoothing between generated video frames.
+Superseded by SVD-XT (StableVideoDiffusionPipeline) in Phase 6.
+Original path: multigenai/temporal/optical_flow.py
+See legacy/README.md for reuse context (Phase 9).
 """
 
 from __future__ import annotations

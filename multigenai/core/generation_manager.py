@@ -115,19 +115,53 @@ class GenerationManager:
                 ModelLifecycle.safe_unload(image_engine)
 
         # -------------------------------------------------------------
-        # STEP 2: Generate Video via VideoEngine (SVD-XT)
+        # STEP 2: Generate SVD-XT keyframes
         # -------------------------------------------------------------
         LOG.info("GenerationManager: Booting isolated VideoEngine (SVD-XT)...")
         from multigenai.engines.video_engine.engine import VideoEngine  # bypasses ModelRegistry (Phase 7)
+        from multigenai.core.model_lifecycle import ModelLifecycle
 
-        video_engine = None
+        video_engine = VideoEngine(self._ctx)
         try:
-            video_engine = VideoEngine(self._ctx)
-            video_result = video_engine.generate(request, conditioning_image_path)
-            return video_result
+            frames, out_path, seed = video_engine.generate_frames(request, conditioning_image_path)
+        except Exception as exc:
+            LOG.error(f"GenerationManager: VideoEngine failed: {exc}", exc_info=True)
+            from multigenai.engines.video_engine.engine import VideoResult
+            return VideoResult(path="", frame_count=0, fps=request.fps, seed=0, success=False, error=str(exc))
         finally:
-            from multigenai.core.model_lifecycle import ModelLifecycle
+            # VideoEngine unloads inside generate_frames() — safe_unload here is a
+            # belt-and-suspenders guard for any partially constructed state.
             ModelLifecycle.safe_unload(video_engine)
+
+        # -------------------------------------------------------------
+        # STEP 3 (Phase 8): RIFE Frame Interpolation — strictly isolated
+        # SVD is fully unloaded before InterpolationEngine boots.
+        # -------------------------------------------------------------
+        if request.interpolate and request.interpolation_factor > 1:
+            LOG.info(
+                f"GenerationManager: Booting InterpolationEngine "
+                f"(factor={request.interpolation_factor})..."
+            )
+            from multigenai.engines.interpolation_engine.engine import InterpolationEngine
+            interp_engine = InterpolationEngine(self._ctx)
+            try:
+                frames = interp_engine.interpolate(frames, request.interpolation_factor)
+            finally:
+                # InterpolationEngine unloads inside interpolate() — extra safeguard
+                ModelLifecycle.safe_unload(interp_engine)
+
+        # -------------------------------------------------------------
+        # STEP 4: Encode frames to mp4 via ffmpeg
+        # -------------------------------------------------------------
+        LOG.info(f"GenerationManager: Encoding {len(frames)} frames to mp4...")
+        video_engine_enc = VideoEngine(self._ctx)
+        return video_engine_enc.encode(
+            frames=frames,
+            out_path=out_path,
+            fps=request.fps,
+            seed=seed,
+            requested_frames=request.num_frames,
+        )
 
 
     def generate_image(self, request: "ImageGenerationRequest") -> "ImageResult":

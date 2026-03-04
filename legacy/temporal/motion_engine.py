@@ -1,8 +1,9 @@
 """
-MotionEngine — Phase 5 stub.
+MotionEngine — Phase 5 stub (ARCHIVED to legacy/).
 
-Phase 5 will implement AnimateDiff-style motion module injection
-for generating temporally coherent video from keyframes.
+Superseded by SVD-XT (StableVideoDiffusionPipeline) in Phase 6.
+Original path: multigenai/temporal/motion_engine.py
+See legacy/README.md for reuse context (Phase 9 AnimateDiff).
 """
 
 from __future__ import annotations
