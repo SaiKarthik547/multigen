@@ -34,11 +34,13 @@ class PromptCompiler:
     # Quality tokens injected once, here and nowhere else in the pipeline
     _QUALITY_TOKENS = "ultra-detailed, sharp focus, masterpiece, high fidelity"
 
-    # Baseline negative prompt — stable across all SDXL-family models
+    # Baseline negative prompt — heavily weighted against CGI, statues, and low-quality artifacts
     _BASE_NEGATIVE = (
         "low quality, worst quality, text, signature, watermark, blurry, "
         "distorted anatomy, extra fingers, malformed hands, overexposed, "
-        "noise, jpeg artifacts, grainy, flat, ugly, oversaturated"
+        "noise, jpeg artifacts, grainy, flat, ugly, oversaturated, "
+        "statue, idol, static, CGI, 3D render, cartoon, artificial, "
+        "lifeless, unmoving, plastic, painting, illustration, uncanney valley"
     )
 
     # CLIP text encoder hard limit is 77 tokens (including BOS/EOS).
@@ -136,13 +138,19 @@ class PromptCompiler:
         positive_prompt = ", ".join(p.strip() for p in parts if p.strip())
 
         # ---------------------------------------------------------------
-        # Negative prompt (model-aware)
+        # Negative prompt (model-aware & user-aware)
         # ---------------------------------------------------------------
-        negative_prompt = self._BASE_NEGATIVE
+        negative_parts = [self._BASE_NEGATIVE]
+        
         _mn = model_name.lower()
         if "sdxl" in _mn or "stable-diffusion-xl" in _mn:
             # SDXL-family additions — matches both short alias and full HF repo id
-            negative_prompt += ", deformed, disfigured, bad proportions"
+            negative_parts.append("deformed, disfigured, bad proportions")
+            
+        if blueprint.negative_prompt:
+            negative_parts.append(blueprint.negative_prompt.strip())
+            
+        negative_prompt = ", ".join(negative_parts)
 
         # ---------------------------------------------------------------
         # Hard token cap — must be the final step before returning
@@ -151,3 +159,4 @@ class PromptCompiler:
         negative_prompt = self._truncate_prompt(negative_prompt)
 
         return positive_prompt, negative_prompt
+

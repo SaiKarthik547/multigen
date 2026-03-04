@@ -42,6 +42,7 @@ class SceneBlueprint(BaseModel):
     atmosphere: str
     camera_description: str
     rendering_style: str
+    negative_prompt: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +111,7 @@ class SceneDesigner:
             atmosphere=atmosphere,
             camera_description=cam_desc,
             rendering_style=rendering_style,
+            negative_prompt=request.negative_prompt,
         )
 
     def design_video(self, request: "VideoGenerationRequest") -> SceneBlueprint:
@@ -141,5 +143,6 @@ class SceneDesigner:
             atmosphere=atmosphere,
             camera_description="cinematic medium shot",
             rendering_style="cinematic",
+            negative_prompt=request.negative_prompt,
         )
 
