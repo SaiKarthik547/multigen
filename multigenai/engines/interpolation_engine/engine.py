@@ -103,44 +103,46 @@ class InterpolationEngine:
         self, f0: "PILImage", f1: "PILImage", factor: int
     ) -> List["PILImage"]:
         """
-        Generate (factor - 1) intermediate frames between f0 and f1.
+        Generate (factor - 1) intermediate frames between f0 and f1 using
+        the official RIFE IFNet_HDv3 inference API.
+
+        The model's `.inference(img0, img1, timestep)` method handles the
+        internal channel layout (flow fields, timestep encoding, etc.) so we
+        never have to manually construct the 11-channel input tensor.
 
         Returns:
-            List of (factor - 1) PIL Images (the intermediate frames only,
+            List of (factor - 1) PIL Images (intermediate frames only,
             NOT including f0 or f1).
         """
-        import torch
-        import torch.nn.functional as F
+        import math
         import numpy as np
+        import torch
         from PIL import Image as PILImage
 
-        import math
-        intermediates = []
+        intermediates: List["PILImage"] = []
 
         # ----------------------------------------------------------------
-        # RIFE requires input dimensions to be multiples of 32.
-        # Pad to the next multiple, run inference, crop back to original.
+        # RIFE requires input dimensions divisible by 32.
+        # Pad → infer → crop back to original size.
         # ----------------------------------------------------------------
-        orig_w, orig_h = f0.size
+        orig_w, orig_h =f0.size
         pad_w = math.ceil(orig_w / 32) * 32
         pad_h = math.ceil(orig_h / 32) * 32
 
         def pad_img(img: "PILImage") -> "PILImage":
             if img.size == (pad_w, pad_h):
                 return img
-            # Use LANCZOS for quality — keeps edge pixels clean
             return img.resize((pad_w, pad_h), PILImage.Resampling.LANCZOS)
 
-        # Convert PIL → float32 tensor [1, C, H, W] in [0, 1]
+        _device = "cpu" if self.device == "directml" else self.device
+
         def to_tensor(img: "PILImage") -> "torch.Tensor":
             arr = np.array(img.convert("RGB")).astype(np.float32) / 255.0
-            t = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
-            return t.to(self.device if self.device != "directml" else "cpu")
+            return torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(_device)
 
-        def to_pil(t: "torch.Tensor") -> "PILImage":
-            arr = (t.squeeze(0).permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255)
+        def to_pil(tensor: "torch.Tensor") -> "PILImage":
+            arr = (tensor.squeeze(0).permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255)
             img = PILImage.fromarray(arr.astype(np.uint8))
-            # Crop back to original resolution after RIFE inference
             if img.size != (orig_w, orig_h):
                 img = img.resize((orig_w, orig_h), PILImage.Resampling.LANCZOS)
             return img
@@ -149,15 +151,15 @@ class InterpolationEngine:
         t1 = to_tensor(pad_img(f1))
 
         for i in range(1, factor):
-            # t is the fractional timestep in (0, 1) for this intermediate frame.
-            # RIFE uses this to blend flow fields — without it every frame is identical.
+            # Fractional timestep in (0, 1) — passed directly to RIFE inference.
+            # The RIFE model uses this to blend bidirectional optical flows at the
+            # correct point in time, producing genuinely distinct intermediate frames.
             t = i / factor
-            t_tensor = torch.full_like(t0[:, :1], t)  # [1, 1, H, W] filled with t
-
-            x = torch.cat([t0, t1, t_tensor], dim=1)  # [1, 7, H, W]
             with torch.no_grad():
-                mid = self._model(x)
+                mid = self._model.inference(t0, t1, t)
             intermediates.append(to_pil(mid))
+
+        return intermediates
 
         return intermediates
 

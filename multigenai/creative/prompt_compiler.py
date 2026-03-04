@@ -41,6 +41,45 @@ class PromptCompiler:
         "noise, jpeg artifacts, grainy, flat, ugly, oversaturated"
     )
 
+    # CLIP text encoder hard limit is 77 tokens (including BOS/EOS).
+    # We cap at 70 to leave headroom for the special tokens and avoid the
+    # "Token indices sequence length … > 77" warning in SDXL/SVD pipelines.
+    _MAX_TOKENS = 70
+
+    def _truncate_prompt(self, text: str) -> str:
+        """
+        Truncate a comma-separated prompt to at most _MAX_TOKENS words.
+
+        Uses whitespace-split word count as a fast approximation of CLIP token
+        count (1 word ≈ 1–1.3 tokens for typical prompt vocabulary).
+        Whole comma-delimited phrases are preserved where possible.
+
+        A WARNING is emitted when truncation actually occurs so it shows up
+        in Kaggle logs and CI output.
+        """
+        words = text.split()
+        if len(words) <= self._MAX_TOKENS:
+            return text
+
+        # Build phrase list and drop trailing phrases until we're within budget
+        phrases = [p.strip() for p in text.split(",") if p.strip()]
+        kept: list[str] = []
+        total = 0
+        for phrase in phrases:
+            phrase_words = len(phrase.split())
+            if total + phrase_words > self._MAX_TOKENS:
+                break
+            kept.append(phrase)
+            total += phrase_words
+
+        truncated = ", ".join(kept)
+        import logging
+        logging.getLogger(__name__).warning(
+            f"PromptCompiler: prompt truncated from {len(words)} → {total} words "
+            f"(CLIP limit {self._MAX_TOKENS})."
+        )
+        return truncated
+
     def compile(self, blueprint: SceneBlueprint, model_name: str) -> Tuple[str, str]:
         """
         Compile a SceneBlueprint into (positive_prompt, negative_prompt).
@@ -57,6 +96,7 @@ class PromptCompiler:
         Returns
         -------
         (positive_prompt, negative_prompt) tuple of strings.
+        Both are hard-capped at _MAX_TOKENS words to stay within CLIP limits.
         """
         # ---------------------------------------------------------------
         # P8 — Boundary enforcement: structural fields must stay clean
@@ -103,5 +143,11 @@ class PromptCompiler:
         if "sdxl" in _mn or "stable-diffusion-xl" in _mn:
             # SDXL-family additions — matches both short alias and full HF repo id
             negative_prompt += ", deformed, disfigured, bad proportions"
+
+        # ---------------------------------------------------------------
+        # Hard token cap — must be the final step before returning
+        # ---------------------------------------------------------------
+        positive_prompt = self._truncate_prompt(positive_prompt)
+        negative_prompt = self._truncate_prompt(negative_prompt)
 
         return positive_prompt, negative_prompt
