@@ -67,12 +67,12 @@ Intent → SceneDesigner → PromptCompiler → Isolated Engine → ModelLifecyc
 - **🎬 SVD-XT Video Generation (Phase 6, Hardened)** — SVD-XT pipeline with `decode_chunk_size=2` for ~50% peak VRAM reduction during temporal VAE decode; adaptive pixel-area frame cap (>`600 000px` → max 8 frames on T4); `motion_bucket_id` clamped to `[0, 255]`; `effective_frames` passed explicitly — request object is never mutated; `ffmpeg` streaming lifecycle uses `wait()` before `stderr.read()` to eliminate flush-of-closed-file race on fast Kaggle exits
 - **🤖 GenerationManager Orchestration** — All modalities flow through a single orchestrator; engines are instantiated, run, and destroyed per-request — no engine shares state with another
 - **🧠 Dual LLM Mode** — LLM-enhanced prompts (Gemini/OpenAI/Ollama) with automatic rule-based fallback; zero config required for offline use
-- **👤 Persistent Character Identity** — 512-d ArcFace face embeddings via InsightFace, stored persistently and injected for frame-consistent characters
+- **👤 Persistent Character Identity** — 512-d ArcFace face embeddings via InsightFace, stored persistently and injected for frame-consistent characters; uses `FaceEncoder` (CPU/ONNX) to ensure no VRAM collision with generative models
 - **🌍 Adaptive Execution** — Auto-detects Kaggle, GPU VRAM tier, DirectML (AMD on Windows), and CI environments; supports `performance_mode` (speed/quality/balanced) toggles
 - **📊 Generation Metrics** — Per-run structured metrics (latency, VRAM usage, seed) stored as JSON
 - **🖥️ Streamlit UI** — Full browser-based UI with modality selector and real-time capability report
-- **⏱️ Phase 8 Temporal Enhancement** — `InterpolationEngine` (RIFE IFNet) inserts `(factor−1)` intermediate frames between each SVD keyframe pair; `16 frames × factor 2 → 31 frames`; lazy-loads and unloads independently of SVD; graceful pass-through if RIFE weights unavailable
-- **✅ 252 Tests Passing** — Comprehensive test coverage across all modules without requiring GPU or network
+- **⏱️ Phase 8 Temporal Enhancement (Hardened)** — Local RIFE `InterpolationEngine` (IFNet_2R) inserts `(factor−1)` intermediate frames between each SVD keyframe pair; `16 frames × factor 2 → 31 frames`; utilizes **custom local weights** (`flownet.pkl`) for maximum stability; lazy-loads and unloads independently of SVD; recursive midpoint logic for high-factor interpolation (up to 4x)
+- **✅ 254 Tests Passing** — Comprehensive test coverage across all modules, including local RIFE integration tests
 
 ---
 
@@ -880,6 +880,6 @@ pytest tests/test_compute_stability.py -v  # Metrics, registry, lifecycle (54 te
 | Phase 5 | ✅ Complete | Hard consistency enforcement: seed injection, embedding drift tracking, temporal coherence |
 | Phase 6 | ✅ Complete | **SVD-XT VideoEngine** (Hardened): single-pass Stable Video Diffusion, `decode_chunk_size=2`, adaptive frame cap, motion_bucket clamping, production-grade ffmpeg streaming |
 | Phase 7 | ✅ Complete | **Architecture Overhaul**: SceneDesigner, PromptCompiler, ModelLifecycle, GenerationManager as sole orchestrator, strict VRAM isolation |
-| Phase 8 | ✅ Complete | **Temporal Enhancement**: RIFE `InterpolationEngine`, frame expansion (`n + (n−1)×(factor−1)`), `interpolate`/`interpolation_factor` schema, strict lifecycle, graceful degradation |
+| Phase 8 | ✅ Complete | **Temporal Enhancement**: Local RIFE `InterpolationEngine` (IFNet_2R), custom `flownet.pkl` weight synchronization, recursive midpoint interpolation, `interpolate`/`interpolation_factor` schema, strict VRAM isolation, and high-resolution stability hardening |
 | Phase 9 | 🔜 Planned | ControlNet integration: depth, canny, pose control signals |
 | Phase 10 | 🔜 Planned | Multi-agent DAG orchestration: parallel scene generation, automatic scene assembly |

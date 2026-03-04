@@ -32,7 +32,7 @@ class PromptCompiler:
     """
 
     # Quality tokens injected once, here and nowhere else in the pipeline
-    _QUALITY_TOKENS = "ultra-detailed, sharp focus, masterpiece, high fidelity"
+    _QUALITY_TOKENS = "ultra-detailed, sharp focus, masterpiece, high fidelity, 8k resolution, highly realistic, cinematic lighting"
 
     # Baseline negative prompt — heavily weighted against CGI, statues, and low-quality artifacts
     _BASE_NEGATIVE = (
@@ -40,7 +40,8 @@ class PromptCompiler:
         "distorted anatomy, extra fingers, malformed hands, overexposed, "
         "noise, jpeg artifacts, grainy, flat, ugly, oversaturated, "
         "statue, idol, static, CGI, 3D render, cartoon, artificial, "
-        "lifeless, unmoving, plastic, painting, illustration, uncanney valley"
+        "lifeless, unmoving, plastic, painting, illustration, uncanney valley, "
+        "glitch, low resolution, amateur, poorly drawn"
     )
 
     # CLIP text encoder hard limit is 77 tokens (including BOS/EOS).

@@ -135,9 +135,11 @@ class PromptEngine:
 
         # 5. Negative prompt assembly
         base_negative = (
-            "deformed, distorted, disfigured, poorly drawn, bad anatomy, "
-            "wrong anatomy, extra limb, missing limb, floating limbs, "
-            "mutated hands, blurry, low resolution, watermark, text, signature"
+            "low quality, worst quality, blurry, low resolution, watermark, text, signature, "
+            "deformed, distorted, disfigured, poorly drawn, bad anatomy, wrong anatomy, "
+            "extra limb, missing limb, floating limbs, mutated hands, "
+            "statue, idol, static, CGI, 3D render, cartoon, artificial, "
+            "lifeless, unmoving, plastic, painting, illustration, uncanney valley"
         )
         eff_style = getattr(request, "style", None) or getattr(request, "style_id", None)
         if self._style_registry and eff_style:

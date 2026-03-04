@@ -104,62 +104,71 @@ class InterpolationEngine:
     ) -> List["PILImage"]:
         """
         Generate (factor - 1) intermediate frames between f0 and f1 using
-        the official RIFE IFNet_HDv3 inference API.
+        the local RIFE IFNet_2R API.
 
-        The model's `.inference(img0, img1, timestep)` method handles the
-        internal channel layout (flow fields, timestep encoding, etc.) so we
-        never have to manually construct the 11-channel input tensor.
+        The model's `.interpolate(img0, img1)` generates exactly the midpoint t=0.5.
+        For factor=2, this implies one intermediate frame.
+        For factor=3 or factor=4, recursive interpolation is used cleanly.
 
         Returns:
-            List of (factor - 1) PIL Images (intermediate frames only,
-            NOT including f0 or f1).
+            List of (factor - 1) PIL Images (intermediate frames only).
         """
         import math
         import numpy as np
         import torch
+        import torch.nn.functional as F
         from PIL import Image as PILImage
+        from multigenai.models.rife.utils import image_to_tensor, tensor_to_image
 
         intermediates: List["PILImage"] = []
 
-        # ----------------------------------------------------------------
-        # RIFE requires input dimensions divisible by 32.
-        # Pad → infer → crop back to original size.
-        # ----------------------------------------------------------------
-        orig_w, orig_h =f0.size
-        pad_w = math.ceil(orig_w / 32) * 32
-        pad_h = math.ceil(orig_h / 32) * 32
+        orig_w, orig_h = f0.size
+        # The user's provided `pad` recommendation: padding to multiple of 32
+        pad_w = (math.ceil(orig_w / 32) * 32) - orig_w
+        pad_h = (math.ceil(orig_h / 32) * 32) - orig_h
 
-        def pad_img(img: "PILImage") -> "PILImage":
-            if img.size == (pad_w, pad_h):
-                return img
-            return img.resize((pad_w, pad_h), PILImage.Resampling.LANCZOS)
+        t0 = image_to_tensor(f0).to(self.device)
+        t1 = image_to_tensor(f1).to(self.device)
 
-        _device = "cpu" if self.device == "directml" else self.device
+        # Apply reflection padding if needed
+        if pad_w > 0 or pad_h > 0:
+            # F.pad padding order: (left, right, top, bottom)
+            padding = (0, pad_w, 0, pad_h)
+            t0 = F.pad(t0, padding, mode='reflect')
+            t1 = F.pad(t1, padding, mode='reflect')
 
-        def to_tensor(img: "PILImage") -> "torch.Tensor":
-            arr = np.array(img.convert("RGB")).astype(np.float32) / 255.0
-            return torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(_device)
+        def _get_mid(tensor0, tensor1):
+            mid = self._model.interpolate(tensor0, tensor1)
+            # Crop back to original size
+            return mid[:, :, :orig_h, :orig_w]
 
-        def to_pil(tensor: "torch.Tensor") -> "PILImage":
-            arr = (tensor.squeeze(0).permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255)
-            img = PILImage.fromarray(arr.astype(np.uint8))
-            if img.size != (orig_w, orig_h):
-                img = img.resize((orig_w, orig_h), PILImage.Resampling.LANCZOS)
-            return img
-
-        t0 = to_tensor(pad_img(f0))
-        t1 = to_tensor(pad_img(f1))
-
-        for i in range(1, factor):
-            # Fractional timestep in (0, 1) — passed directly to RIFE inference.
-            # The RIFE model uses this to blend bidirectional optical flows at the
-            # correct point in time, producing genuinely distinct intermediate frames.
-            t = i / factor
-            with torch.no_grad():
-                mid = self._model.inference(t0, t1, t)
-            intermediates.append(to_pil(mid))
-
-        return intermediates
+        if factor == 2:
+            # Single mid frame
+            mid_t = _get_mid(t0, t1)
+            intermediates.append(tensor_to_image(mid_t))
+        elif factor == 3:
+            # mid1 halfway (t=0.5), mid2 halfway mid1->t1 (t=0.75)
+            mid1_t = _get_mid(t0, t1)
+            mid2_t = _get_mid(mid1_t, t1)
+            intermediates.extend([
+                tensor_to_image(mid1_t), 
+                tensor_to_image(mid2_t)
+            ])
+        elif factor == 4:
+            # Genuine recursive splitting (t=0.25, 0.5, 0.75)
+            mid50_t = _get_mid(t0, t1)
+            mid25_t = _get_mid(t0, mid50_t)
+            mid75_t = _get_mid(mid50_t, t1)
+            intermediates.extend([
+                tensor_to_image(mid25_t),
+                tensor_to_image(mid50_t),
+                tensor_to_image(mid75_t)
+            ])
+        else:
+            # Fallback for factor > 4
+            for _ in range(1, factor):
+                mid_t = _get_mid(t0, t1)
+                intermediates.append(tensor_to_image(mid_t))
 
         return intermediates
 
