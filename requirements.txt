@@ -8,6 +8,7 @@ python-dotenv
 
 # Image, Video, and Text Processing
 Pillow
+opencv-python-headless
 # moviepy removed in Phase 6 (replaced by direct ffmpeg streaming pipe)
 nltk
 matplotlib

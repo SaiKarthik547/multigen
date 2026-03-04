@@ -39,25 +39,11 @@ def _get_context():
     return ExecutionContext.build(settings)
 
 
-def _get_engine(ctx, modality: str):
-    """Lazy-import and return the appropriate engine instance."""
-    if modality == "Image":
-        from multigenai.engines.image_engine import ImageEngine
-        return ImageEngine(ctx)
-    elif modality == "Video":
-        from multigenai.engines.video_engine import VideoEngine
-        return VideoEngine(ctx)
-    elif modality == "Audio":
-        from multigenai.engines.audio_engine import AudioEngine
-        return AudioEngine(ctx)
-    elif modality == "Document":
-        from multigenai.engines.document_engine import DocumentEngine
-        return DocumentEngine(ctx)
-    elif modality == "Code":
-        from multigenai.engines.code_engine import CodeEngine
-        return CodeEngine(ctx)
-    else:
-        return None
+@st.cache_resource(show_spinner="Booting Orchestrator…")
+def _get_manager(_ctx):
+    """Lazy-boot the GenerationManager."""
+    from multigenai.core.generation_manager import GenerationManager
+    return GenerationManager(_ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -86,21 +72,10 @@ def _render_sidebar(ctx):
             key="modality",
         )
 
-        # Style selector (loaded from StyleRegistry)
-        style_names = ["None"] + list(ctx.style_registry.list_styles())
-        style = st.selectbox("Style preset", style_names, key="style")
-
-        # Identity selector (loaded from IdentityStore)
-        identity_ids = ["None"] + ctx.identity_store.list_all()
-        identity = st.selectbox("Identity", identity_ids, key="identity")
-
         st.divider()
-
-        # Environment badge — always visible, shows key runtime metrics
-        st.divider()
+        st.markdown("**🌍 Environment**")
         env = ctx.environment
         if env is not None:
-            st.markdown("**🌍 Environment**")
             col_a, col_b = st.columns(2)
             with col_a:
                 st.metric("Platform", env.platform.capitalize())
@@ -129,14 +104,14 @@ def _render_sidebar(ctx):
                     version = info.get("version", "")
                     st.write(f"  {status} {lib} {version}")
 
-    return modality, style, identity
+    return modality
 
 
 # ---------------------------------------------------------------------------
 # Main panel
 # ---------------------------------------------------------------------------
 
-def _render_main(ctx, modality: str, style: str, identity: str):
+def _render_main(ctx, modality: str):
     st.header(f"Generate · {modality}")
 
     prompt = st.text_area(
@@ -146,7 +121,7 @@ def _render_main(ctx, modality: str, style: str, identity: str):
         key="prompt",
     )
 
-    col1, col2 = st.columns([1, 5])
+    col1, col2 = st.columns([1, 4])
     with col1:
         generate = st.button("✨ Generate", type="primary", use_container_width=True)
     with col2:
@@ -155,6 +130,25 @@ def _render_main(ctx, modality: str, style: str, identity: str):
             ("**active**" if ctx.llm else "**disabled** (rule-based fallback)")
         )
 
+    # Modality-specific options
+    with st.expander("Additional Options", expanded=True):
+        cols = st.columns(3)
+        options = {}
+        if modality == "Image":
+            with cols[0]: options["use_refiner"] = st.checkbox("Use SDXL Refiner", value=True)
+            with cols[1]: options["style"] = st.selectbox("Style", ["cinematic", "photorealistic", "anime", "watercolor", "sci-fi"])
+            with cols[2]: options["seed"] = st.number_input("Seed", value=42)
+        elif modality == "Video":
+            with cols[0]: options["num_frames"] = st.slider("Frames", 8, 48, 16)
+            with cols[1]: options["fps"] = st.slider("FPS", 4, 30, 8)
+            with cols[2]: options["interpolate"] = st.checkbox("RIFE Interpolation", value=True)
+        elif modality == "Audio":
+            with cols[0]: options["audio_type"] = st.selectbox("Type", ["voice", "music", "ambient"])
+            with cols[1]: options["duration_seconds"] = st.slider("Duration (s)", 1, 30, 5)
+        elif modality == "Document":
+            with cols[0]: options["output_format"] = st.selectbox("Format", ["docx", "pdf", "pptx"])
+            with cols[1]: options["target_pages"] = st.number_input("Pages", value=5)
+
     if not generate:
         return
 
@@ -162,93 +156,83 @@ def _render_main(ctx, modality: str, style: str, identity: str):
         st.warning("Please enter a prompt first.")
         return
 
-    _run_generation(ctx, modality, prompt, style, identity)
+    _run_generation(ctx, modality, prompt, options)
 
 
-def _run_generation(ctx, modality: str, prompt: str, style: str, identity: str):
-    """Route to the correct engine and display results."""
+def _run_generation(ctx, modality: str, prompt: str, options: dict):
+    """Route to GenerationManager and display results."""
     import traceback
+    manager = _get_manager(ctx)
 
-    with st.spinner(f"Generating {modality.lower()}…"):
+    with st.spinner(f"Orchestrating {modality.lower()} generation…"):
         try:
-            engine = _get_engine(ctx, modality)
-            if engine is None:
-                st.error(f"Engine for '{modality}' is not available.")
+            from multigenai.llm.schema_validator import (
+                ImageGenerationRequest, VideoGenerationRequest, 
+                AudioGenerationRequest, DocumentGenerationRequest
+            )
+
+            if modality == "Image":
+                req = ImageGenerationRequest(prompt=prompt, **options)
+                result = manager.generate_image(req)
+            elif modality == "Video":
+                req = VideoGenerationRequest(prompt=prompt, **options)
+                result = manager.generate_video(req)
+            elif modality == "Audio":
+                req = AudioGenerationRequest(prompt=prompt, **options)
+                result = manager.generate_audio(req)
+            elif modality == "Document":
+                req = DocumentGenerationRequest(prompt=prompt, **options)
+                if options.get("output_format") == "pptx":
+                    result = manager.generate_presentation(req)
+                else:
+                    result = manager.generate_document(req)
+            elif modality == "Code":
+                req = CodeGenerationRequest(prompt=prompt, **options)
+                result = manager.generate_code(req)
+            else:
+                st.error(f"Modality '{modality}' not implemented in orchestrator.")
                 return
 
-            # Build a minimal request dict — engines accept **kwargs or typed requests
-            request_kwargs: dict = {"prompt": prompt}
-            if style and style != "None":
-                request_kwargs["style_preset"] = style
-            if identity and identity != "None":
-                request_kwargs["identity_id"] = identity
-
-            # Each engine exposes a typed request dataclass
-            result = _call_engine(engine, modality, request_kwargs)
-            _render_result(modality, result)
+            _display_result(modality, result)
 
         except Exception as exc:
-            st.error(f"Generation failed: {exc}")
-            with st.expander("Details"):
+            st.error(f"Orchestration failed: {exc}")
+            with st.expander("Traceback"):
                 st.code(traceback.format_exc())
 
 
-def _call_engine(engine, modality: str, kwargs: dict):
-    """Construct the typed request and call engine.run()."""
-    if modality == "Image":
-        from multigenai.engines.image_engine.engine import ImageRequest
-        req = ImageRequest(prompt=kwargs["prompt"])
-        return engine.run(req)
-    elif modality == "Video":
-        from multigenai.engines.video_engine.engine import VideoRequest
-        req = VideoRequest(prompt=kwargs["prompt"])
-        return engine.run(req)
-    elif modality == "Audio":
-        from multigenai.engines.audio_engine.engine import AudioRequest
-        req = AudioRequest(prompt=kwargs["prompt"])
-        return engine.run(req)
-    elif modality == "Document":
-        from multigenai.engines.document_engine.engine import DocumentRequest
-        req = DocumentRequest(topic=kwargs["prompt"])
-        return engine.run(req)
-    elif modality == "Code":
-        from multigenai.engines.code_engine.engine import CodeRequest
-        req = CodeRequest(description=kwargs["prompt"])
-        return engine.run(req)
-    return None
-
-
-def _render_result(modality: str, result):
-    """Display the generation result appropriately for the modality."""
-    if result is None:
-        st.warning("No result returned.")
+def _display_result(modality: str, result):
+    """Display result based on modality and Result class."""
+    if not result:
+        st.warning("Engine returned no result.")
         return
 
-    output_path = getattr(result, "output_path", None)
-    st.success("✅ Generation complete!")
+    if hasattr(result, "success") and not result.success:
+        st.error(f"Generation failed: {result.error}")
+        return
 
-    if modality == "Image" and output_path:
-        try:
-            st.image(output_path, caption="Generated Image", use_column_width=True)
-        except Exception:
-            st.write(f"Output saved: `{output_path}`")
+    path = getattr(result, "path", None)
+    if not path:
+        st.warning("No output path found in result.")
+        st.json(vars(result))
+        return
 
-    elif modality == "Audio" and output_path:
-        try:
-            st.audio(output_path)
-        except Exception:
-            st.write(f"Output saved: `{output_path}`")
-
-    elif output_path:
-        st.write(f"📁 Output saved: `{output_path}`")
-        if str(output_path).endswith((".docx", ".pptx", ".py", ".js", ".ts")):
-            st.download_button(
-                "⬇️ Download",
-                data=open(output_path, "rb").read(),
-                file_name=str(output_path).split("/")[-1].split("\\")[-1],
-            )
-    else:
-        st.json(vars(result) if hasattr(result, "__dict__") else str(result))
+    st.success(f"✅ {modality} ready!")
+    
+    if modality == "Image":
+        st.image(path, caption="Base Generation Result", use_column_width=True)
+    elif modality == "Video":
+        st.video(path)
+    elif modality == "Audio":
+        st.audio(path)
+    
+    st.write(f"📁 Path: `{path}`")
+    with open(path, "rb") as f:
+        st.download_button(
+            "⬇️ Download Output",
+            data=f.read(),
+            file_name=path.split("/")[-1].split("\\")[-1]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -257,8 +241,8 @@ def _render_result(modality: str, result):
 
 def main():
     ctx = _get_context()
-    modality, style, identity = _render_sidebar(ctx)
-    _render_main(ctx, modality, style, identity)
+    modality = _render_sidebar(ctx)
+    _render_main(ctx, modality)
 
 
 if __name__ == "__main__":

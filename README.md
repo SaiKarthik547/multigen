@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://python.org)
 [![Diffusers](https://img.shields.io/badge/Diffusers-0.24%2B-orange)](https://github.com/huggingface/diffusers)
-[![Tests](https://img.shields.io/badge/Tests-252%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/Tests-254%20passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/License-MIT-green)](#license)
 
 ---
@@ -70,7 +70,7 @@ Intent → SceneDesigner → PromptCompiler → Isolated Engine → ModelLifecyc
 - **👤 Persistent Character Identity** — 512-d ArcFace face embeddings via InsightFace, stored persistently and injected for frame-consistent characters; uses `FaceEncoder` (CPU/ONNX) to ensure no VRAM collision with generative models
 - **🌍 Adaptive Execution** — Auto-detects Kaggle, GPU VRAM tier, DirectML (AMD on Windows), and CI environments; supports `performance_mode` (speed/quality/balanced) toggles
 - **📊 Generation Metrics** — Per-run structured metrics (latency, VRAM usage, seed) stored as JSON
-- **🖥️ Streamlit UI** — Full browser-based UI with modality selector and real-time capability report
+- **🖥️ Hardened Streamlit UI** — Full browser-based UI orchestrated by `GenerationManager`; supports image, video, audio, code, and document generation with real-time health-checks and VRAM isolation
 - **⏱️ Phase 8 Temporal Enhancement (Hardened)** — Local RIFE `InterpolationEngine` (IFNet_2R) inserts `(factor−1)` intermediate frames between each SVD keyframe pair; `16 frames × factor 2 → 31 frames`; utilizes **custom local weights** (`flownet.pkl`) for maximum stability; lazy-loads and unloads independently of SVD; recursive midpoint logic for high-factor interpolation (up to 4x)
 - **✅ 254 Tests Passing** — Comprehensive test coverage across all modules, including local RIFE integration tests
 
@@ -395,7 +395,8 @@ The **sole orchestrator** for all generation modalities. All CLI, API, and UI re
 - Instantiates each engine per-request, never shares engines between requests
 - Calls `SceneDesigner → PromptCompiler` before any diffusion call
 - Calls `ModelLifecycle.safe_unload()` in every `finally` block
-- Video generation: `ImageEngine` (keyframe) → unload → `VideoEngine` (SVD-XT) → unload
+- **Multi-modal orchestration**: manages `generate_image`, `generate_video`, `generate_audio`, `generate_document`, and `generate_code` flows in isolation
+- **Video workflow**: `ImageEngine` (keyframe) → unload → `VideoEngine` (SVD-XT) → unload → `InterpolationEngine` (RIFE)
 
 ```python
 from multigenai.core.generation_manager import GenerationManager
@@ -854,7 +855,7 @@ vid_result = manager.generate_video(VideoGenerationRequest(
 ## Running Tests
 
 ```bash
-# Run all 252 tests
+# Run all 254 tests
 pytest tests/ -v
 
 # Individual suites

@@ -97,7 +97,7 @@ class AudioEngine:
             # Resolve voice embedding — do NOT access face_embedding here
             from multigenai.identity.identity_resolver import IdentityResolver
             from multigenai.memory.identity_store import IdentityStore
-            store = IdentityStore(self._ctx.settings.output_dir)
+            store = IdentityStore(self._ctx.settings.memory.store_dir)
             voice_emb = IdentityResolver.get_voice_embedding(identity_name, store)
             if voice_emb is not None:
                 LOG.info(

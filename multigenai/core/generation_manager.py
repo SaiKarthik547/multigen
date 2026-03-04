@@ -19,13 +19,15 @@ if TYPE_CHECKING:
         ImageGenerationRequest,
         VideoGenerationRequest,
         AudioGenerationRequest,
-        DocumentGenerationRequest
+        DocumentGenerationRequest,
+        CodeGenerationRequest
     )
     from multigenai.engines.image_engine.engine import ImageResult
     from multigenai.engines.video_engine.engine import VideoResult
     from multigenai.engines.audio_engine.engine import AudioResult
     from multigenai.engines.document_engine.engine import DocumentResult
     from multigenai.engines.presentation_engine.engine import PresentationResult
+    from multigenai.engines.code_engine.engine import CodeResult
 
 LOG = get_logger(__name__)
 
@@ -216,6 +218,17 @@ class GenerationManager:
         try:
             engine = PresentationEngine(self._ctx)
             return engine.run(request)
+        finally:
+            from multigenai.core.model_lifecycle import ModelLifecycle
+            ModelLifecycle.safe_unload(engine)
+
+    def generate_code(self, request: "CodeGenerationRequest") -> "CodeResult":
+        """Orchestrates Code generation."""
+        LOG.info("GenerationManager: Booting isolated CodeEngine...")
+        from multigenai.engines.code_engine.engine import CodeEngine
+        try:
+            engine = CodeEngine(self._ctx)
+            return engine.run(request.prompt)
         finally:
             from multigenai.core.model_lifecycle import ModelLifecycle
             ModelLifecycle.safe_unload(engine)

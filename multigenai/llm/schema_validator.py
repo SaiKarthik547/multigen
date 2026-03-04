@@ -171,6 +171,13 @@ class DocumentGenerationRequest(BaseModel):
     output_format: str = "docx"        # docx | pdf | pptx
 
 
+class CodeGenerationRequest(BaseModel):
+    """Validated request for the Code Engine (Phase 1 stub)."""
+    prompt: str = Field(..., min_length=3)
+    language: str = "python"           # python | javascript | ...
+    file_name: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # Enhanced prompt output from PromptEngine
 # ---------------------------------------------------------------------------
