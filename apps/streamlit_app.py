@@ -121,6 +121,23 @@ def _render_main(ctx, modality: str):
         key="prompt",
     )
 
+    # Negative prompt — shown for modalities that support it
+    negative_prompt = ""
+    if modality in ("Image", "Video"):
+        with st.expander("🚫 Negative Prompt (optional)", expanded=False):
+            negative_prompt = st.text_area(
+                "Negative Prompt",
+                placeholder="Things to avoid, e.g.: blurry, extra limbs, watermark, distorted…",
+                height=70,
+                key="negative_prompt",
+                label_visibility="collapsed",
+            )
+            st.caption(
+                "💡 Your additions are **merged** with the built-in base negative tokens — "
+                "all tokens are segmented by the Phase 9 `NegativePromptManager` to stay within "
+                "the CLIP 25-token reserve per segment."
+            )
+
     col1, col2 = st.columns([1, 4])
     with col1:
         generate = st.button("✨ Generate", type="primary", use_container_width=True)
@@ -156,10 +173,10 @@ def _render_main(ctx, modality: str):
         st.warning("Please enter a prompt first.")
         return
 
-    _run_generation(ctx, modality, prompt, options)
+    _run_generation(ctx, modality, prompt, options, negative_prompt=negative_prompt)
 
 
-def _run_generation(ctx, modality: str, prompt: str, options: dict):
+def _run_generation(ctx, modality: str, prompt: str, options: dict, negative_prompt: str = ""):
     """Route to GenerationManager and display results."""
     import traceback
     manager = _get_manager(ctx)
@@ -172,10 +189,18 @@ def _run_generation(ctx, modality: str, prompt: str, options: dict):
             )
 
             if modality == "Image":
-                req = ImageGenerationRequest(prompt=prompt, **options)
+                req = ImageGenerationRequest(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    **options,
+                )
                 result = manager.generate_image(req)
             elif modality == "Video":
-                req = VideoGenerationRequest(prompt=prompt, **options)
+                req = VideoGenerationRequest(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    **options,
+                )
                 result = manager.generate_video(req)
             elif modality == "Audio":
                 req = AudioGenerationRequest(prompt=prompt, **options)

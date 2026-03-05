@@ -55,6 +55,7 @@ def _startup():
 @app.command()
 def image(
     prompt: str = typer.Option(..., "--prompt", "-p", help="Image description."),
+    negative: Optional[str] = typer.Option(None, "--negative", "-n", help="Negative prompt — things to avoid (merged with built-in base negatives)."),
     style: Optional[str] = typer.Option(None, "--style", "-s", help="Style ID (e.g. cinematic-dark)."),
     width: int = typer.Option(1024, "--width", "-W", help="Image width in pixels."),
     height: int = typer.Option(1024, "--height", "-H", help="Image height in pixels."),
@@ -68,7 +69,9 @@ def image(
     from multigenai.core.generation_manager import GenerationManager
 
     request = ImageGenerationRequest(
-        prompt=prompt, style=style,
+        prompt=prompt,
+        negative_prompt=negative or "",
+        style=style,
         width=width, height=height,
         seed=seed,
     )
@@ -89,6 +92,7 @@ def image(
 @app.command()
 def video(
     prompt: str = typer.Option(..., "--prompt", "-p", help="Video scene description."),
+    negative: Optional[str] = typer.Option(None, "--negative", "-n", help="Negative prompt — things to avoid."),
     style: Optional[str] = typer.Option(None, "--style", "-s", help="Style ID."),
     frames: int = typer.Option(10, "--frames", "-f", help="Number of frames."),
     fps: int = typer.Option(24, "--fps", help="Frames per second."),
@@ -102,7 +106,9 @@ def video(
     from multigenai.core.generation_manager import GenerationManager
 
     request = VideoGenerationRequest(
-        prompt=prompt, style_id=style,
+        prompt=prompt,
+        negative_prompt=negative or "",
+        style_id=style,
         num_frames=frames, fps=fps,
         width=width, height=height, seed=seed,
     )
