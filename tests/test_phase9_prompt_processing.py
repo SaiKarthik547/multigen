@@ -342,8 +342,7 @@ class TestNegativePromptManager:
         # Master negative is ~82 tokens — always splits with default reserve=25
         # All resulting segments must individually fit within the negative reserve
         assert len(segs) >= 1
-        from multigenai.prompting.token_budget_manager import TokenBudgetManager
-        mgr = TokenBudgetManager()
+        mgr = npm._mgr
         for seg in segs:
             assert mgr.count_tokens(seg) <= mgr.budget.negative_reserve, (
                 f"Segment exceeds reserve: '{seg}' = {mgr.count_tokens(seg)} tokens"

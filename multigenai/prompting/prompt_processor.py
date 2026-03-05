@@ -156,9 +156,16 @@ class PromptProcessor:
                 model_name=effective_model,
             )
             pairs = neg_mgr.pair([prompt.strip()])
+
+            # Enforce budget even on fast-path pairs
+            enforced_pairs = [
+                (self._budget_mgr.trim_positive(p), self._budget_mgr.trim_negative(n))
+                for p, n in pairs
+            ]
+
             plan = PromptPlan.from_pairs(
                 original_prompt=prompt,
-                pairs=pairs,
+                pairs=enforced_pairs,
                 positive_budget=budget.positive_budget,
                 negative_reserve=budget.negative_reserve,
             )
@@ -192,10 +199,17 @@ class PromptProcessor:
         )
         pairs = neg_mgr.pair(segments)
 
-        # 5. Build plan
+        # 5. Finalize: strictly enforce budgets on all segments
+        enforced_pairs = []
+        for p, n in pairs:
+            p_trim = self._budget_mgr.trim_positive(p)
+            n_trim = self._budget_mgr.trim_negative(n)
+            enforced_pairs.append((p_trim, n_trim))
+
+        # 6. Build plan
         plan = PromptPlan.from_pairs(
             original_prompt=prompt,
-            pairs=pairs,
+            pairs=enforced_pairs,
             positive_budget=budget.positive_budget,
             negative_reserve=budget.negative_reserve,
         )

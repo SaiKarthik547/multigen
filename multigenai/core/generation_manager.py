@@ -88,40 +88,47 @@ class GenerationManager:
         )
 
         original_unload = self._ctx.behaviour.auto_unload_after_gen
-        self._ctx.behaviour.auto_unload_after_gen = True
+        self._ctx.behaviour.auto_unload_after_gen = False  # Prevent unload during loop iteration
 
         results: List["ImageResult"] = []
         seg_dir = self._segmented_dir(plan.run_id) if plan.is_multi_segment else None
+        
+        engine = None
+        try:
+            # P9 Optimization: load model ONCE per plan, not per segment
+            engine = ImageEngine(self._ctx)
+            
+            for seg in plan.segments:
+                # Build a per-segment request with the processed prompts
+                seg_request = request.model_copy(update={"prompt": seg.positive})
 
-        for seg in plan.segments:
-            # Build a per-segment request with the processed prompts
-            seg_request = request.model_copy(update={"prompt": seg.positive})
+                scene = SceneDesigner().design(seg_request)
+                compiled_pos, _ = PromptCompiler().compile(scene, request.model_name)
+                # Use the processor's negative (already token-safe)
+                compiled_neg = seg.negative
 
-            scene = SceneDesigner().design(seg_request)
-            compiled_pos, _ = PromptCompiler().compile(scene, request.model_name)
-            # Use the processor's negative (already token-safe)
-            compiled_neg = seg.negative
+                # strict enforcement again because PromptCompiler may have appended _QUALITY_TOKENS
+                compiled_pos = processor._budget_mgr.trim_positive(compiled_pos)
 
-            engine = None
-            try:
-                engine = ImageEngine(self._ctx)
-                result = engine.run(compiled_pos, compiled_neg, seg_request)
+                try:
+                    result = engine.run(compiled_pos, compiled_neg, seg_request)
 
-                if seg_dir is not None and result.success:
-                    result = self._relocate_result(result, seg_dir, seg.index, "png")
+                    if seg_dir is not None and result.success:
+                        result = self._relocate_result(result, seg_dir, seg.index, "png")
 
-                results.append(result)
-                LOG.info(
-                    f"GenerationManager: Image segment {seg.index + 1}/{plan.segment_count} done. "
-                    f"path={result.path}"
-                )
-            except Exception as exc:
-                LOG.error(
-                    f"GenerationManager: Image segment {seg.index} failed: {exc}",
-                    exc_info=True,
-                )
-            finally:
-                self._ctx.behaviour.auto_unload_after_gen = original_unload
+                    results.append(result)
+                    LOG.info(
+                        f"GenerationManager: Image segment {seg.index + 1}/{plan.segment_count} done. "
+                        f"path={result.path}"
+                    )
+                except Exception as exc:
+                    LOG.error(
+                        f"GenerationManager: Image segment {seg.index} failed: {exc}",
+                        exc_info=True,
+                    )
+        finally:
+            self._ctx.behaviour.auto_unload_after_gen = original_unload
+            if engine and original_unload:
                 ModelLifecycle.safe_unload(engine)
 
         # Return the first successful result (or the last attempt for error info)

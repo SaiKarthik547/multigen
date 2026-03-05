@@ -26,8 +26,8 @@ from typing import List
 # Default budget constants (overridden by PromptSettings at runtime)
 # ---------------------------------------------------------------------------
 _DEFAULT_MAX_TOKENS: int = 75        # usable CLIP slots (BOS/EOS excluded from accounting)
-_DEFAULT_NEG_RESERVE: int = 25       # tokens reserved for negative prompt
-_DEFAULT_POS_BUDGET: int = _DEFAULT_MAX_TOKENS - _DEFAULT_NEG_RESERVE  # 50
+_DEFAULT_NEG_RESERVE: int = 15       # tokens reserved for negative prompt (user enforced positive+negative<=77)
+_DEFAULT_POS_BUDGET: int = _DEFAULT_MAX_TOKENS - _DEFAULT_NEG_RESERVE  # 60
 
 
 @dataclass(frozen=True)
@@ -168,6 +168,25 @@ class TokenBudgetManager:
     def split_negative(self, text: str) -> List[str]:
         """Split negative prompt into negative-reserve-sized chunks."""
         return self.split_to_budget(text, self._budget.negative_reserve)
+
+    def trim_positive(self, text: str) -> str:
+        """
+        Hard-trim a positive segment to guarantee it fits the budget.
+        Re-evaluates the actual token sequence and safely cuts without severing words.
+        """
+        if self.fits_positive_budget(text):
+            return text
+        chunks = self.split_positive(text)
+        return chunks[0] if chunks else text
+
+    def trim_negative(self, text: str) -> str:
+        """
+        Hard-trim a negative segment to guarantee it fits the reserve.
+        """
+        if self.fits_negative_budget(text):
+            return text
+        chunks = self.split_negative(text)
+        return chunks[0] if chunks else text
 
     # ------------------------------------------------------------------
     # Internal helpers
