@@ -148,11 +148,20 @@ class LifecycleManager:
         if not LifecycleManager._process_started:
             return
             
-        def safe_log(msg: str):
+        def safe_log(msg: str) -> None:
+            """
+            Emit a shutdown log message without emitting 'Logging error' tracebacks
+            to stderr when the stream is already closed (e.g. during pytest teardown).
+            """
+            import logging as _logging
+            _prev = _logging.raiseExceptions
             try:
+                _logging.raiseExceptions = False   # suppress handler.handleError() output
                 LOG.info(msg)
             except Exception:
                 pass
+            finally:
+                _logging.raiseExceptions = _prev
 
         safe_log("MultiGenAI OS shutting down…")
 
@@ -169,7 +178,10 @@ class LifecycleManager:
         # Clear CUDA cache
         try:
             from multigenai.core.device_manager import DeviceManager
+            _prev2 = __import__("logging").raiseExceptions
+            __import__("logging").raiseExceptions = False
             DeviceManager().clear_cache()
+            __import__("logging").raiseExceptions = _prev2
         except Exception:
             pass
 

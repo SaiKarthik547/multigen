@@ -53,3 +53,13 @@ sdxl:
   # Kaggle / T4 stable resolution — drops peak VRAM by ~30% vs 1024×1024
   default_width: 768
   default_height: 768
+
+# ---------------------------------------------------------------------------
+# Phase 9 — Advanced Prompt Processing Engine
+# Override via env vars: MGOS_PROMPT_MAX_TOKENS, MGOS_PROMPT_NEGATIVE_RESERVE, etc.
+# ---------------------------------------------------------------------------
+prompt:
+  max_tokens: 75              # CLIP hard limit (77 − 2 BOS/EOS slots)
+  negative_reserve: 25        # Tokens reserved per segment for the negative prompt
+  segmentation_mode: semantic # semantic | sentence | word
+  expansion: true             # Enrich sparse segments with context tokens

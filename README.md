@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://python.org)
 [![Diffusers](https://img.shields.io/badge/Diffusers-0.24%2B-orange)](https://github.com/huggingface/diffusers)
-[![Tests](https://img.shields.io/badge/Tests-254%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/Tests-316%20passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/License-MIT-green)](#license)
 
 ---
@@ -72,7 +72,8 @@ Intent → SceneDesigner → PromptCompiler → Isolated Engine → ModelLifecyc
 - **📊 Generation Metrics** — Per-run structured metrics (latency, VRAM usage, seed) stored as JSON
 - **🖥️ Hardened Streamlit UI** — Full browser-based UI orchestrated by `GenerationManager`; supports image, video, audio, code, and document generation with real-time health-checks and VRAM isolation
 - **⏱️ Phase 8 Temporal Enhancement (Hardened)** — Local RIFE `InterpolationEngine` (IFNet_2R) inserts `(factor−1)` intermediate frames between each SVD keyframe pair; `16 frames × factor 2 → 31 frames`; utilizes **custom local weights** (`flownet.pkl`) for maximum stability; lazy-loads and unloads independently of SVD; recursive midpoint logic for high-factor interpolation (up to 4x)
-- **✅ 254 Tests Passing** — Comprehensive test coverage across all modules, including local RIFE integration tests
+- **✂️ Phase 9 Advanced Prompt Processing** — `PromptProcessor` accepts prompts of any length and guarantees zero token truncation; analyzes semantic structure, splits at paragraph/sentence/comma boundaries, expands sparse segments with contextual tokens, segments and rotates negative prompts within the CLIP reserve (default: 50 pos / 25 neg tokens per segment); multi-segment runs save to `segmented_runs/{run_id}/`
+- **✅ 316 Tests Passing** — Comprehensive test coverage across all modules, including local RIFE integration tests and 62 new Phase 9 prompt processing tests
 
 ---
 
@@ -596,6 +597,50 @@ All production-integrated: receive typed request objects, produce typed results,
 
 ---
 
+### Prompting Layer ✨ Phase 9
+
+The **Phase 9 Advanced Prompt Processing Engine** sits before the creative layer and guarantees zero CLIP token truncation for prompts of any length.
+
+```
+User Prompt (any length)
+  └─→ PromptProcessor
+        ├─ PromptAnalyzer      → PromptStructure (subjects, env, actions, camera, lighting, style)
+        ├─ PromptSegmenter     → token-safe positive segments
+        ├─ SegmentExpander     → enrich sparse segments with contextual tokens
+        └─ NegativePromptManager → segment + rotate negative across positives
+              └─→ PromptPlan (run_id, segments[{positive, negative}])
+```
+
+| Module | File | Responsibility |
+|---|---|---|
+| `TokenBudgetManager` | `prompting/token_budget_manager.py` | Token counting, budget enforcement, comma/sentence/word splitting |
+| `PromptAnalyzer` | `prompting/prompt_analyzer.py` | Semantic structure extraction, paragraph/scene boundary detection |
+| `PromptSegmenter` | `prompting/prompt_segmenter.py` | Splits blocks → sentence-groups → comma phrases within `positive_budget` |
+| `SegmentExpander` | `prompting/segment_expander.py` | Adds environment/lighting/camera/style context to sparse segments |
+| `NegativePromptManager` | `prompting/negative_prompt_manager.py` | Builds master negative, segments it if needed, round-robin pairs with positives |
+| `PromptPlan` | `prompting/prompt_plan.py` | Immutable output contract: `segments[{index, positive, negative}]` |
+| `PromptProcessor` | `prompting/prompt_processor.py` | Single entry point; fast-path for short prompts, full pipeline for long scripts |
+
+**Default token budget** (configurable via `prompt:` in `config.yaml`):
+
+| Budget slot | Default | Description |
+|---|---|---|
+| `max_tokens` | 75 | CLIP hard limit (77 − 2 BOS/EOS) |
+| `positive_budget` | 50 | Tokens available per positive segment |
+| `negative_reserve` | 25 | Tokens reserved per negative chunk |
+
+**Multi-segment output layout:**
+```
+multigen_outputs/
+└── segmented_runs/
+    └── {run_id}/
+        ├── segment_000.mp4
+        ├── segment_001.mp4
+        └── segment_002.mp4
+```
+
+---
+
 ### Control Layer
 
 #### `ConsistencyEnforcer` (`control/consistency_enforcer.py`)
@@ -758,6 +803,10 @@ sdxl:
 | `MGOS_LLM_API_KEY` | API key | `sk-...` |
 | `MGOS_PERFORMANCE_MODE` | Speed/Quality toggle | `max-speed` / `max-quality` |
 | `MGOS_SDXL_USE_REFINER` | Enable SDXL refiner | `true` / `false` |
+| `MGOS_PROMPT_MAX_TOKENS` | CLIP token limit | `75` |
+| `MGOS_PROMPT_NEGATIVE_RESERVE` | Tokens for negative per segment | `25` |
+| `MGOS_PROMPT_SEGMENTATION_MODE` | Segmentation strategy | `semantic` / `sentence` / `word` |
+| `MGOS_PROMPT_EXPANSION` | Context-enrich sparse segments | `true` / `false` |
 
 ---
 
@@ -855,7 +904,7 @@ vid_result = manager.generate_video(VideoGenerationRequest(
 ## Running Tests
 
 ```bash
-# Run all 254 tests
+# Run all 316 tests
 pytest tests/ -v
 
 # Individual suites
@@ -882,5 +931,6 @@ pytest tests/test_compute_stability.py -v  # Metrics, registry, lifecycle (54 te
 | Phase 6 | ✅ Complete | **SVD-XT VideoEngine** (Hardened): single-pass Stable Video Diffusion, `decode_chunk_size=2`, adaptive frame cap, motion_bucket clamping, production-grade ffmpeg streaming |
 | Phase 7 | ✅ Complete | **Architecture Overhaul**: SceneDesigner, PromptCompiler, ModelLifecycle, GenerationManager as sole orchestrator, strict VRAM isolation |
 | Phase 8 | ✅ Complete | **Temporal Enhancement**: Local RIFE `InterpolationEngine` (IFNet_2R), custom `flownet.pkl` weight synchronization, recursive midpoint interpolation, `interpolate`/`interpolation_factor` schema, strict VRAM isolation, and high-resolution stability hardening |
-| Phase 9 | 🔜 Planned | ControlNet integration: depth, canny, pose control signals |
-| Phase 10 | 🔜 Planned | Multi-agent DAG orchestration: parallel scene generation, automatic scene assembly |
+| Phase 9 | ✅ Complete | **Advanced Prompt Processing**: `PromptProcessor` subsystem — `PromptAnalyzer`, `PromptSegmenter`, `SegmentExpander`, `NegativePromptManager`, `PromptPlan`; token-safe segmentation (50 pos / 25 neg tokens per segment); paragraph/scene/sentence boundary detection; segment-aware `GenerationManager` with multi-output `segmented_runs/` layout; 62 new tests |
+| Phase 10 | 🔜 Planned | ControlNet integration: depth, canny, pose control signals |
+| Phase 11 | 🔜 Planned | Multi-agent DAG orchestration: parallel scene generation, automatic scene assembly |

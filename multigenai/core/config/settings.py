@@ -99,6 +99,30 @@ class LLMSettings:
     timeout_seconds: float = 30.0
 
 
+@dataclass
+class PromptSettings:
+    """
+    Configuration for the Phase 9 Advanced Prompt Processing Engine.
+
+    All fields overridable via MGOS_PROMPT_<FIELD> environment variables.
+
+    Attributes:
+        max_tokens:        CLIP token hard limit (75 = BOS/EOS-safe headroom from 77).
+        negative_reserve:  Tokens reserved for negative prompt per segment.
+        segmentation_mode: "semantic" (default) | "sentence" | "word"
+        expansion:         Enrich sparse segments with context tokens (True default).
+    """
+    max_tokens: int = 75
+    negative_reserve: int = 25
+    segmentation_mode: str = "semantic"    # semantic | sentence | word
+    expansion: bool = True
+
+    @property
+    def positive_budget(self) -> int:
+        """Derived: tokens available for positive prompt per segment."""
+        return self.max_tokens - self.negative_reserve
+
+
 # ---------------------------------------------------------------------------
 # Top-level Settings
 # ---------------------------------------------------------------------------
@@ -117,6 +141,7 @@ class Settings:
     orchestration: OrchestrationSettings = field(default_factory=OrchestrationSettings)
     llm: LLMSettings = field(default_factory=LLMSettings)
     sdxl: SDXLSettings = field(default_factory=SDXLSettings)
+    prompt: PromptSettings = field(default_factory=PromptSettings)
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +206,7 @@ def get_settings(config_path: Optional[pathlib.Path] = None) -> Settings:
     orch_raw = raw.get("orchestration", {})
     llm_raw = raw.get("llm", {})
     sdxl_raw = raw.get("sdxl", {})
+    prompt_raw = raw.get("prompt", {})
 
     return Settings(
         mode=_env("mode", raw.get("mode", "dev")),
@@ -264,6 +290,28 @@ def get_settings(config_path: Optional[pathlib.Path] = None) -> Settings:
                     "sdxl_default_height",
                     float(sdxl_raw.get("default_height", 768)),
                 )
+            ),
+        ),
+        prompt=PromptSettings(
+            max_tokens=int(
+                _env_float(
+                    "prompt_max_tokens",
+                    float(prompt_raw.get("max_tokens", 75)),
+                )
+            ),
+            negative_reserve=int(
+                _env_float(
+                    "prompt_negative_reserve",
+                    float(prompt_raw.get("negative_reserve", 25)),
+                )
+            ),
+            segmentation_mode=_env(
+                "prompt_segmentation_mode",
+                prompt_raw.get("segmentation_mode", "semantic"),
+            ),
+            expansion=_env_bool(
+                "prompt_expansion",
+                bool(prompt_raw.get("expansion", True)),
             ),
         ),
     )

@@ -208,7 +208,14 @@ class ModelRegistry:
                 if entry.loaded:
                     entry.instance = None
                     entry.loaded = False
-                    LOG.info(f"Model '{mid}' unloaded during shutdown.")
+                    try:
+                        import logging as _lg
+                        _prev = _lg.raiseExceptions
+                        _lg.raiseExceptions = False
+                        LOG.info(f"Model '{mid}' unloaded during shutdown.")
+                        _lg.raiseExceptions = _prev
+                    except Exception:
+                        pass
 
     def update_runtime(self, model_id: str, duration_seconds: float, peak_vram_mb: int = 0) -> None:
         """

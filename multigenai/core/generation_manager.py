@@ -2,15 +2,19 @@
 GenerationManager — Orchestrates the safe, non-overlapping execution
 of distinct generative engines (Image, Video, Audio).
 
-Phase 6: Ensures `ImageEngine` (SDXL) and `VideoEngine` (SVD-XT)
-never overlap in VRAM by strictly enforcing load/unload lifecycles
-during sequential generation flows.
+Phase 6:  SDXL + SVD-XT strict VRAM isolation.
+Phase 7:  SceneDesigner → PromptCompiler creative layer.
+Phase 8:  RIFE InterpolationEngine.
+Phase 9:  PromptProcessor — token-safe segmentation, no truncation.
+         Multi-segment plans iterate engines per-segment and save each
+         output independently to segmented_runs/{run_id}/.
 """
 
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Optional
+import pathlib
+from typing import TYPE_CHECKING, List, Optional
 
 from multigenai.core.logging.logger import get_logger
 
@@ -28,6 +32,7 @@ if TYPE_CHECKING:
     from multigenai.engines.document_engine.engine import DocumentResult
     from multigenai.engines.presentation_engine.engine import PresentationResult
     from multigenai.engines.code_engine.engine import CodeResult
+    from multigenai.prompting.prompt_plan import PromptPlan
 
 LOG = get_logger(__name__)
 
@@ -35,110 +40,218 @@ LOG = get_logger(__name__)
 class GenerationManager:
     """
     Central orchestrator for engine workflows.
-    Ensures safe, isolated model execution and memory clearance
-    between different models.
+
+    Phase 9 addition:
+      All image and video flows now run the prompt through PromptProcessor
+      BEFORE the creative layer.  For short prompts this is a zero-overhead
+      pass-through.  For long scripts the processor returns multiple
+      PromptSegments, each of which is generated independently.
+
+    Multi-segment output layout:
+      {output_dir}/segmented_runs/{run_id}/segment_{N:03d}.{ext}
     """
 
-    def __init__(self, ctx: "ExecutionContext") -> None:
+    def __init__(self, ctx) -> None:
         self._ctx = ctx
+
+    # ------------------------------------------------------------------
+    # Phase 9 helper — build PromptProcessor from context settings
+    # ------------------------------------------------------------------
+    def _build_processor(self, model_name: str = "sdxl-base"):
+        """Lazily construct a PromptProcessor from application settings."""
+        from multigenai.prompting.prompt_processor import PromptProcessor
+        return PromptProcessor.from_settings(self._ctx.settings, model_name=model_name)
+
+    # ------------------------------------------------------------------
+    # Image generation
+    # ------------------------------------------------------------------
+
+    def generate_image(self, request: "ImageGenerationRequest") -> "ImageResult":
+        """
+        Orchestrate SDXL image generation with Phase 9 prompt processing.
+
+        For multi-segment plans the first successful segment's result is
+        returned; all segments are generated and saved independently.
+        """
+        LOG.info("GenerationManager: Booting isolated ImageEngine (SDXL)...")
+        from multigenai.engines.image_engine.engine import ImageEngine
+        from multigenai.creative.scene_designer import SceneDesigner
+        from multigenai.creative.prompt_compiler import PromptCompiler
+        from multigenai.core.model_lifecycle import ModelLifecycle
+
+        # --- Phase 9: process prompt ---
+        processor = self._build_processor(model_name=request.model_name)
+        plan = processor.process(
+            prompt=request.prompt,
+            negative_prompt=getattr(request, "negative_prompt", ""),
+            model_name=request.model_name,
+        )
+
+        original_unload = self._ctx.behaviour.auto_unload_after_gen
+        self._ctx.behaviour.auto_unload_after_gen = True
+
+        results: List["ImageResult"] = []
+        seg_dir = self._segmented_dir(plan.run_id) if plan.is_multi_segment else None
+
+        for seg in plan.segments:
+            # Build a per-segment request with the processed prompts
+            seg_request = request.model_copy(update={"prompt": seg.positive})
+
+            scene = SceneDesigner().design(seg_request)
+            compiled_pos, _ = PromptCompiler().compile(scene, request.model_name)
+            # Use the processor's negative (already token-safe)
+            compiled_neg = seg.negative
+
+            engine = None
+            try:
+                engine = ImageEngine(self._ctx)
+                result = engine.run(compiled_pos, compiled_neg, seg_request)
+
+                if seg_dir is not None and result.success:
+                    result = self._relocate_result(result, seg_dir, seg.index, "png")
+
+                results.append(result)
+                LOG.info(
+                    f"GenerationManager: Image segment {seg.index + 1}/{plan.segment_count} done. "
+                    f"path={result.path}"
+                )
+            except Exception as exc:
+                LOG.error(
+                    f"GenerationManager: Image segment {seg.index} failed: {exc}",
+                    exc_info=True,
+                )
+            finally:
+                self._ctx.behaviour.auto_unload_after_gen = original_unload
+                ModelLifecycle.safe_unload(engine)
+
+        # Return the first successful result (or the last attempt for error info)
+        for r in results:
+            if r.success:
+                return r
+        return results[-1] if results else self._image_fail("no segments generated")
+
+    # ------------------------------------------------------------------
+    # Video generation
+    # ------------------------------------------------------------------
 
     def generate_video(
         self,
         request: "VideoGenerationRequest",
-        conditioning_image_path: Optional[str] = None
+        conditioning_image_path: Optional[str] = None,
     ) -> "VideoResult":
         """
-        Orchestrates SVD-XT video generation.
+        Orchestrate SVD-XT video generation with Phase 9 prompt processing.
 
-        Architecture contract (Phase 7):
-        - The video prompt ALWAYS passes through SceneDesigner → PromptCompiler
-          regardless of whether a conditioning image is provided externally.
-        - If no conditioning_image_path is given, ImageEngine runs first (SDXL),
-          is fully unloaded, then VideoEngine (SVD-XT) boots.
+        Architecture contract (Phase 9):
+        - PromptProcessor runs FIRST on the raw prompt.
+        - For single-segment plans the existing single-pass flow is used.
+        - For multi-segment plans each segment generates its own video
+          saved as segment_{N:03d}.mp4 in segmented_runs/{run_id}/.
         - No diffusion model is ever in VRAM during another engine's run.
         """
-        import torch
-
-        # ------------------------------------------------------------------
-        # Creative layer: process video prompt ALWAYS — before any engine boots
-        # ------------------------------------------------------------------
         from multigenai.creative.scene_designer import SceneDesigner
         from multigenai.creative.prompt_compiler import PromptCompiler
+        from multigenai.core.model_lifecycle import ModelLifecycle
 
-        video_blueprint  = SceneDesigner().design_video(request)
-        compiled_vid_pos, compiled_vid_neg = PromptCompiler().compile(
-            video_blueprint, model_name="svd-xt"
+        # --- Phase 9: process prompt ---
+        processor = self._build_processor(model_name="svd-xt")
+        plan = processor.process(
+            prompt=request.prompt,
+            negative_prompt=getattr(request, "negative_prompt", ""),
+            model_name="svd-xt",
         )
-        LOG.info(f"GenerationManager: Video creative layer compiled prompt.")
 
-        # -------------------------------------------------------------
-        # STEP 1: Generate Conditioning Frame (if needed)
-        # -------------------------------------------------------------
-        if not conditioning_image_path:
+        seg_dir = self._segmented_dir(plan.run_id) if plan.is_multi_segment else None
+        results: List["VideoResult"] = []
+
+        for seg in plan.segments:
+            seg_result = self._generate_video_segment(
+                request=request,
+                positive=seg.positive,
+                negative_override=seg.negative,
+                conditioning_image_path=conditioning_image_path,
+            )
+            if seg_dir is not None and seg_result.success:
+                seg_result = self._relocate_result(seg_result, seg_dir, seg.index, "mp4")
+
+            results.append(seg_result)
+            LOG.info(
+                f"GenerationManager: Video segment {seg.index + 1}/{plan.segment_count} done. "
+                f"path={seg_result.path}"
+            )
+
+        for r in results:
+            if r.success:
+                return r
+        return results[-1] if results else self._video_fail(request, "no segments generated")
+
+    def _generate_video_segment(
+        self,
+        request: "VideoGenerationRequest",
+        positive: str,
+        negative_override: str,
+        conditioning_image_path: Optional[str],
+    ) -> "VideoResult":
+        """
+        Execute one full video generation pass for a single prompt segment.
+        Mirrors the original Phase 7/8 flow exactly.
+        """
+        from multigenai.creative.scene_designer import SceneDesigner
+        from multigenai.creative.prompt_compiler import PromptCompiler
+        from multigenai.core.model_lifecycle import ModelLifecycle
+
+        # Override request prompt for the creative layer
+        seg_request = request.model_copy(update={"prompt": positive})
+        video_blueprint = SceneDesigner().design_video(seg_request)
+        compiled_vid_pos, _ = PromptCompiler().compile(video_blueprint, model_name="svd-xt")
+        compiled_vid_neg = negative_override  # token-safe from PromptProcessor
+
+        # STEP 1: Conditioning frame
+        _conditioning_path = conditioning_image_path
+        if not _conditioning_path:
             LOG.info("GenerationManager: No conditioning image provided. Booting ImageEngine...")
-            from multigenai.engines.image_engine.engine import ImageEngine  # bypasses ModelRegistry (Phase 7)
+            from multigenai.engines.image_engine.engine import ImageEngine
             from multigenai.llm.schema_validator import ImageGenerationRequest
 
             image_req = ImageGenerationRequest(
-                prompt=request.prompt,
-                negative_prompt=request.negative_prompt,
-                # Hard-override resolution to match video dimensions
-                # prevents resize distortion and composition drift in SVD-XT
+                prompt=positive,
+                negative_prompt=compiled_vid_neg,
                 width=request.width,
                 height=request.height,
                 seed=request.seed,
             )
-
             scene = SceneDesigner().design(image_req)
-            compiled_pos, compiled_neg = PromptCompiler().compile(scene, image_req.model_name)
+            compiled_pos, _ = PromptCompiler().compile(scene, image_req.model_name)
 
-            # Important: Force auto-unload so SDXL is erased from VRAM immediately
             original_unload = self._ctx.behaviour.auto_unload_after_gen
             self._ctx.behaviour.auto_unload_after_gen = True
-
             image_engine = None
             try:
                 image_engine = ImageEngine(self._ctx)
-                img_result = image_engine.run(compiled_pos, compiled_neg, image_req)
-
+                img_result = image_engine.run(compiled_pos, compiled_vid_neg, image_req)
                 if not img_result.success:
-                    LOG.error(f"GenerationManager: Failed to generate conditioning frame: {img_result.error}")
-                    from multigenai.engines.video_engine.engine import VideoResult
-                    return VideoResult(path="", frame_count=0, fps=request.fps, seed=0, success=False, error=img_result.error)
-
-                conditioning_image_path = img_result.path
-                LOG.info(f"GenerationManager: Conditioning frame ready at {conditioning_image_path}")
-
+                    LOG.error(f"GenerationManager: Conditioning frame failed: {img_result.error}")
+                    return self._video_fail(request, img_result.error)
+                _conditioning_path = img_result.path
+                LOG.info(f"GenerationManager: Conditioning frame ready at {_conditioning_path}")
             finally:
                 self._ctx.behaviour.auto_unload_after_gen = original_unload
-
-                # Absolute safety flush before booting SVD-XT
-                from multigenai.core.model_lifecycle import ModelLifecycle
                 ModelLifecycle.safe_unload(image_engine)
 
-        # -------------------------------------------------------------
-        # STEP 2: Generate SVD-XT keyframes
-        # -------------------------------------------------------------
+        # STEP 2: SVD-XT keyframes
         LOG.info("GenerationManager: Booting isolated VideoEngine (SVD-XT)...")
-        from multigenai.engines.video_engine.engine import VideoEngine  # bypasses ModelRegistry (Phase 7)
-        from multigenai.core.model_lifecycle import ModelLifecycle
+        from multigenai.engines.video_engine.engine import VideoEngine
 
         video_engine = VideoEngine(self._ctx)
         try:
-            frames, out_path, seed = video_engine.generate_frames(request, conditioning_image_path)
+            frames, out_path, seed = video_engine.generate_frames(seg_request, _conditioning_path)
         except Exception as exc:
             LOG.error(f"GenerationManager: VideoEngine failed: {exc}", exc_info=True)
-            from multigenai.engines.video_engine.engine import VideoResult
-            return VideoResult(path="", frame_count=0, fps=request.fps, seed=0, success=False, error=str(exc))
+            return self._video_fail(request, str(exc))
         finally:
-            # VideoEngine unloads inside generate_frames() — safe_unload here is a
-            # belt-and-suspenders guard for any partially constructed state.
             ModelLifecycle.safe_unload(video_engine)
 
-        # -------------------------------------------------------------
-        # STEP 3 (Phase 8): RIFE Frame Interpolation — strictly isolated
-        # SVD is fully unloaded before InterpolationEngine boots.
-        # -------------------------------------------------------------
+        # STEP 3: RIFE Interpolation
         if request.interpolate and request.interpolation_factor > 1:
             LOG.info(
                 f"GenerationManager: Booting InterpolationEngine "
@@ -149,15 +262,10 @@ class GenerationManager:
             try:
                 frames = interp_engine.interpolate(frames, request.interpolation_factor)
             finally:
-                # InterpolationEngine unloads inside interpolate() — extra safeguard
                 ModelLifecycle.safe_unload(interp_engine)
 
-        # -------------------------------------------------------------
-        # STEP 4: Encode frames to mp4 via ffmpeg
-        # encode() is a @staticmethod — no VideoEngine instantiation needed
-        # -------------------------------------------------------------
+        # STEP 4: Encode → mp4
         LOG.info(f"GenerationManager: Encoding {len(frames)} frames to mp4...")
-        from multigenai.engines.video_engine.engine import VideoEngine
         return VideoEngine.encode(
             frames=frames,
             out_path=out_path,
@@ -166,69 +274,96 @@ class GenerationManager:
             requested_frames=request.num_frames,
         )
 
-
-    def generate_image(self, request: "ImageGenerationRequest") -> "ImageResult":
-        """Orchestrates SDXL image generation with strict lifecycle."""
-        LOG.info("GenerationManager: Booting isolated ImageEngine (SDXL)...")
-        from multigenai.engines.image_engine.engine import ImageEngine
-        from multigenai.creative.scene_designer import SceneDesigner
-        from multigenai.creative.prompt_compiler import PromptCompiler
-        
-        scene = SceneDesigner().design(request)
-        compiled_pos, compiled_neg = PromptCompiler().compile(scene, request.model_name)
-        
-        # Override context to force unload
-        original_unload = self._ctx.behaviour.auto_unload_after_gen
-        self._ctx.behaviour.auto_unload_after_gen = True
-        
-        try:
-            engine = ImageEngine(self._ctx)
-            return engine.run(compiled_pos, compiled_neg, request)
-        finally:
-            self._ctx.behaviour.auto_unload_after_gen = original_unload
-            from multigenai.core.model_lifecycle import ModelLifecycle
-            ModelLifecycle.safe_unload(engine)
+    # ------------------------------------------------------------------
+    # Audio / Document / Presentation / Code — unchanged lifecycle
+    # ------------------------------------------------------------------
 
     def generate_audio(self, request: "AudioGenerationRequest") -> "AudioResult":
         """Orchestrates Audio generation with strict lifecycle."""
         LOG.info("GenerationManager: Booting isolated AudioEngine...")
         from multigenai.engines.audio_engine.engine import AudioEngine
+        from multigenai.core.model_lifecycle import ModelLifecycle
         try:
             engine = AudioEngine(self._ctx)
             return engine.run(request)
         finally:
-            from multigenai.core.model_lifecycle import ModelLifecycle
             ModelLifecycle.safe_unload(engine)
 
     def generate_document(self, request: "DocumentGenerationRequest") -> "DocumentResult":
         """Orchestrates Document generation."""
         LOG.info("GenerationManager: Booting isolated DocumentEngine...")
         from multigenai.engines.document_engine.engine import DocumentEngine
+        from multigenai.core.model_lifecycle import ModelLifecycle
         try:
             engine = DocumentEngine(self._ctx)
             return engine.run(request)
         finally:
-            from multigenai.core.model_lifecycle import ModelLifecycle
             ModelLifecycle.safe_unload(engine)
 
     def generate_presentation(self, request: "DocumentGenerationRequest") -> "PresentationResult":
         """Orchestrates Presentation generation."""
         LOG.info("GenerationManager: Booting isolated PresentationEngine...")
         from multigenai.engines.presentation_engine.engine import PresentationEngine
+        from multigenai.core.model_lifecycle import ModelLifecycle
         try:
             engine = PresentationEngine(self._ctx)
             return engine.run(request)
         finally:
-            from multigenai.core.model_lifecycle import ModelLifecycle
             ModelLifecycle.safe_unload(engine)
 
     def generate_code(self, request: "CodeGenerationRequest") -> "CodeResult":
         """Orchestrates Code generation."""
         LOG.info("GenerationManager: Booting isolated CodeEngine...")
         from multigenai.engines.code_engine.engine import CodeEngine
+        from multigenai.core.model_lifecycle import ModelLifecycle
         try:
             engine = CodeEngine(self._ctx)
             return engine.run(request.prompt)
         finally:
-            from multigenai.core.model_lifecycle import ModelLifecycle
             ModelLifecycle.safe_unload(engine)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _segmented_dir(self, run_id: str) -> pathlib.Path:
+        """Create and return the segmented-run output directory."""
+        out = (
+            pathlib.Path(self._ctx.settings.output_dir)
+            / "segmented_runs"
+            / run_id
+        )
+        out.mkdir(parents=True, exist_ok=True)
+        LOG.info(f"GenerationManager: multi-segment output dir → {out}")
+        return out
+
+    def _relocate_result(self, result, dest_dir: pathlib.Path, index: int, ext: str):
+        """
+        Copy a result file into the segmented runs directory and update result.path.
+        Returns the original result object with path mutated.
+        """
+        import shutil
+        src = pathlib.Path(result.path)
+        if src.exists():
+            dst = dest_dir / f"segment_{index:03d}.{ext}"
+            shutil.copy2(src, dst)
+            # dataclass may be frozen — try attribute set, else return copy
+            try:
+                object.__setattr__(result, "path", str(dst))
+            except (TypeError, AttributeError):
+                pass  # frozen dataclass — caller will see original path
+        return result
+
+    @staticmethod
+    def _image_fail(error: str):
+        from multigenai.engines.image_engine.engine import ImageResult
+        return ImageResult(path="", seed=0, success=False, error=error)
+
+    @staticmethod
+    def _video_fail(request, error: str):
+        from multigenai.engines.video_engine.engine import VideoResult
+        return VideoResult(
+            path="", frame_count=0,
+            fps=request.fps, seed=0,
+            success=False, error=error,
+        )
