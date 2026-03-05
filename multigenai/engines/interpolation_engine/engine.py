@@ -77,6 +77,9 @@ class InterpolationEngine:
         Lazy-load RIFE IFNet weights.
         Sets self._model to None if loading fails (graceful degradation).
         """
+        if self._model is not None:
+            return  # Model already cached
+            
         from multigenai.engines.interpolation_engine.model_loader import load_rife_model
         self._model, self.device = load_rife_model(self.device)
 
@@ -230,4 +233,5 @@ class InterpolationEngine:
             return frames
 
         finally:
-            self._unload_model()
+            if self._ctx.behaviour.auto_unload_after_gen:
+                self._unload_model()

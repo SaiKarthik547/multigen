@@ -13,8 +13,12 @@ def test_local_rife_interpolation_factor_2(mock_frames):
     """Test that the local RIFE model properly extends 2 frames to 3 frames."""
     torch = pytest.importorskip("torch")
     
+    class DummyBehaviour:
+        auto_unload_after_gen = True
+
     class DummyCtx:
         device = "cpu"
+        behaviour = DummyBehaviour()
         
     engine = InterpolationEngine(DummyCtx())
     
@@ -32,8 +36,12 @@ def test_local_rife_interpolation_factor_4(mock_frames):
     """Test recursive interpolation for factor 4 -> 5 frames out of 2 inputs."""
     torch = pytest.importorskip("torch")
     
+    class DummyBehaviour:
+        auto_unload_after_gen = True
+
     class DummyCtx:
         device = "cpu"
+        behaviour = DummyBehaviour()
         
     engine = InterpolationEngine(DummyCtx())
     

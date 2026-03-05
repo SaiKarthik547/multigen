@@ -143,6 +143,9 @@ class ImageEngine:
         repo_id = self._resolve_model_name(model_name)
         is_xl = "xl" in repo_id.lower()
 
+        if self.pipe is not None:
+            return  # Model is already cached from a previous request
+
         if is_xl:
             from diffusers import StableDiffusionXLPipeline
             LOG.info(f"Loading SDXL model {repo_id} (fp16)...")
@@ -209,19 +212,20 @@ class ImageEngine:
         Determinism contract: `generator` is the same CPU-seeded object from `run()`.
         Never instantiate a new Generator here.
 
-        The refiner is loaded AFTER base is unloaded — VRAM overlap is impossible.
+        The refiner is loaded AFTER base is unloaded (if auto_unload_after_gen) to prevent VRAM overlap.
         """
         import torch
         from diffusers import StableDiffusionXLImg2ImgPipeline
 
-        LOG.info("Loading SDXL refiner model (fp16, all memory optimizations)...")
-        self.refiner = StableDiffusionXLImg2ImgPipeline.from_pretrained(
-            REFINER_REPO,
-            torch_dtype=torch.float16,
-            variant="fp16",
-            use_safetensors=True,
-        )
-        self.refiner = _apply_memory_optimizations(self.refiner, self.device)
+        if self.refiner is None:
+            LOG.info("Loading SDXL refiner model (fp16, all memory optimizations)...")
+            self.refiner = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+                REFINER_REPO,
+                torch_dtype=torch.float16,
+                variant="fp16",
+                use_safetensors=True,
+            )
+            self.refiner = _apply_memory_optimizations(self.refiner, self.device)
 
         LOG.info(f"Refining image ({request.num_inference_steps} steps, strength=0.2)...")
         refined = self.refiner(
@@ -233,9 +237,10 @@ class ImageEngine:
             strength=0.2,
         )
 
-        # Immediate teardown — never keep refiner alive between runs
-        ModelLifecycle.safe_unload(self.refiner)
-        self.refiner = None
+        # Immediate teardown if required — otherwise keep alive for next segment
+        if self._ctx.behaviour.auto_unload_after_gen:
+            ModelLifecycle.safe_unload(self.refiner)
+            self.refiner = None
 
         return refined.images[0]
 
@@ -273,10 +278,11 @@ class ImageEngine:
             # Base generation pass
             image = self._generate(compiled_prompt, negative_prompt, request, generator, seed)
 
-            # Drop base before allocating refiner — guarantees no VRAM overlap
+            # Drop base before allocating refiner if forced to unload
             if request.use_refiner:
-                ModelLifecycle.safe_unload(self.pipe)
-                self.pipe = None
+                if self._ctx.behaviour.auto_unload_after_gen:
+                    ModelLifecycle.safe_unload(self.pipe)
+                    self.pipe = None
                 image = self._refine(image, compiled_prompt, negative_prompt, request, generator)
 
             image.save(out_path)
@@ -287,9 +293,10 @@ class ImageEngine:
             return ImageResult(str(out_path), request.width, request.height, seed, False, str(exc))
 
         finally:
-            ModelLifecycle.safe_unload(self.pipe)
-            self.pipe = None
-            ModelLifecycle.safe_unload(self.refiner)
-            self.refiner = None
+            if self._ctx.behaviour.auto_unload_after_gen:
+                ModelLifecycle.safe_unload(self.pipe)
+                self.pipe = None
+                ModelLifecycle.safe_unload(self.refiner)
+                self.refiner = None
 
         return ImageResult(str(out_path), request.width, request.height, seed, True)

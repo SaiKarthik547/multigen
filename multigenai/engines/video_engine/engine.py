@@ -285,8 +285,8 @@ class VideoEngine:
             del init_image
             return frames, out_path, seed
         finally:
-            # Always unload after generation — InterpolationEngine must boot clean
-            self._unload_model()
+            if self._ctx.behaviour.auto_unload_after_gen:
+                self._unload_model()
 
     @staticmethod
     def encode(
