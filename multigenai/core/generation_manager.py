@@ -151,10 +151,10 @@ class GenerationManager:
 
         Architecture contract (Phase 9):
         - PromptProcessor runs FIRST on the raw prompt.
-        - For single-segment plans the existing single-pass flow is used.
-        - For multi-segment plans each segment generates its own video
-          saved as segment_{N:03d}.mp4 in segmented_runs/{run_id}/.
-        - No diffusion model is ever in VRAM during another engine's run.
+        - Segments are grouped by pipeline stage to completely prevent VRAM thrashing:
+          1. ImageEngine generates ALL conditioning frames (loaded once).
+          2. VideoEngine generates ALL keyframes (loaded once).
+          3. InterpolationEngine processes all output frames.
         """
         from multigenai.creative.scene_designer import SceneDesigner
         from multigenai.creative.prompt_compiler import PromptCompiler
@@ -169,96 +169,73 @@ class GenerationManager:
         )
 
         seg_dir = self._segmented_dir(plan.run_id) if plan.is_multi_segment else None
-        results: List["VideoResult"] = []
 
-        for seg in plan.segments:
-            seg_result = self._generate_video_segment(
-                request=request,
-                positive=seg.positive,
-                negative_override=seg.negative,
-                conditioning_image_path=conditioning_image_path,
-            )
-            if seg_dir is not None and seg_result.success:
-                seg_result = self._relocate_result(seg_result, seg_dir, seg.index, "mp4")
-
-            results.append(seg_result)
-            LOG.info(
-                f"GenerationManager: Video segment {seg.index + 1}/{plan.segment_count} done. "
-                f"path={seg_result.path}"
-            )
-
-        for r in results:
-            if r.success:
-                return r
-        return results[-1] if results else self._video_fail(request, "no segments generated")
-
-    def _generate_video_segment(
-        self,
-        request: "VideoGenerationRequest",
-        positive: str,
-        negative_override: str,
-        conditioning_image_path: Optional[str],
-    ) -> "VideoResult":
-        """
-        Execute one full video generation pass for a single prompt segment.
-        Mirrors the original Phase 7/8 flow exactly.
-        """
-        from multigenai.creative.scene_designer import SceneDesigner
-        from multigenai.creative.prompt_compiler import PromptCompiler
-        from multigenai.core.model_lifecycle import ModelLifecycle
-
-        # Override request prompt for the creative layer
-        seg_request = request.model_copy(update={"prompt": positive})
-        video_blueprint = SceneDesigner().design_video(seg_request)
-        compiled_vid_pos, _ = PromptCompiler().compile(video_blueprint, model_name="svd-xt")
-        compiled_vid_neg = negative_override  # token-safe from PromptProcessor
-
-        # STEP 1: Conditioning frame
-        _conditioning_path = conditioning_image_path
-        if not _conditioning_path:
-            LOG.info("GenerationManager: No conditioning image provided. Booting ImageEngine...")
+        # STEP 1: Generate all conditioning frames
+        conditioning_paths = []
+        if conditioning_image_path:
+            conditioning_paths = [conditioning_image_path] * plan.segment_count
+        else:
+            LOG.info("GenerationManager: No initial conditioning image. Booting ImageEngine for all segments...")
             from multigenai.engines.image_engine.engine import ImageEngine
             from multigenai.llm.schema_validator import ImageGenerationRequest
-
-            image_req = ImageGenerationRequest(
-                prompt=positive,
-                negative_prompt=compiled_vid_neg,
-                width=request.width,
-                height=request.height,
-                seed=request.seed,
-            )
-            scene = SceneDesigner().design(image_req)
-            compiled_pos, _ = PromptCompiler().compile(scene, image_req.model_name)
-
+            
             original_unload = self._ctx.behaviour.auto_unload_after_gen
-            self._ctx.behaviour.auto_unload_after_gen = True
+            self._ctx.behaviour.auto_unload_after_gen = False
             image_engine = None
             try:
                 image_engine = ImageEngine(self._ctx)
-                img_result = image_engine.run(compiled_pos, compiled_vid_neg, image_req)
-                if not img_result.success:
-                    LOG.error(f"GenerationManager: Conditioning frame failed: {img_result.error}")
-                    return self._video_fail(request, img_result.error)
-                _conditioning_path = img_result.path
-                LOG.info(f"GenerationManager: Conditioning frame ready at {_conditioning_path}")
+                for seg in plan.segments:
+                    image_req = ImageGenerationRequest(
+                        prompt=seg.positive,
+                        negative_prompt=seg.negative,
+                        width=request.width,
+                        height=request.height,
+                        seed=request.seed,
+                    )
+                    scene = SceneDesigner().design(image_req)
+                    compiled_pos, _ = PromptCompiler().compile(scene, image_req.model_name)
+                    
+                    # STRICT P9 token enforcement: ensure PromptCompiler additions fit
+                    compiled_pos = processor._budget_mgr.trim_positive(compiled_pos)
+                    
+                    img_result = image_engine.run(compiled_pos, seg.negative, image_req)
+                    if not img_result.success:
+                        LOG.error(f"GenerationManager: Conditioning frame failed: {img_result.error}")
+                        return self._video_fail(request, img_result.error)
+                    conditioning_paths.append(img_result.path)
             finally:
                 self._ctx.behaviour.auto_unload_after_gen = original_unload
-                ModelLifecycle.safe_unload(image_engine)
+                if image_engine and original_unload:
+                    ModelLifecycle.safe_unload(image_engine)
 
-        # STEP 2: SVD-XT keyframes
-        LOG.info("GenerationManager: Booting isolated VideoEngine (SVD-XT)...")
+        # STEP 2: SVD-XT Keyframes (Load VideoEngine once)
+        LOG.info("GenerationManager: Booting isolated VideoEngine (SVD-XT) for all segments...")
         from multigenai.engines.video_engine.engine import VideoEngine
-
-        video_engine = VideoEngine(self._ctx)
+        
+        original_unload = self._ctx.behaviour.auto_unload_after_gen
+        self._ctx.behaviour.auto_unload_after_gen = False
+        video_engine = None
+        
+        # Tuple of (segment, frames, out_path, seed)
+        seg_frames = []
         try:
-            frames, out_path, seed = video_engine.generate_frames(seg_request, _conditioning_path)
+            video_engine = VideoEngine(self._ctx)
+            for seg, c_path in zip(plan.segments, conditioning_paths):
+                seg_request = request.model_copy(update={"prompt": seg.positive})
+                frames, out_path, seed = video_engine.generate_frames(seg_request, c_path)
+                seg_frames.append((seg, frames, out_path, seed))
         except Exception as exc:
             LOG.error(f"GenerationManager: VideoEngine failed: {exc}", exc_info=True)
             return self._video_fail(request, str(exc))
         finally:
-            ModelLifecycle.safe_unload(video_engine)
+            self._ctx.behaviour.auto_unload_after_gen = original_unload
+            if video_engine and original_unload:
+                ModelLifecycle.safe_unload(video_engine)
 
-        # STEP 3: RIFE Interpolation
+        # STEP 3 & 4: Interpolation and mp4 Encoding
+        results: List["VideoResult"] = []
+        
+        interp_engine = None
         if request.interpolate and request.interpolation_factor > 1:
             LOG.info(
                 f"GenerationManager: Booting InterpolationEngine "
@@ -266,20 +243,41 @@ class GenerationManager:
             )
             from multigenai.engines.interpolation_engine.engine import InterpolationEngine
             interp_engine = InterpolationEngine(self._ctx)
-            try:
-                frames = interp_engine.interpolate(frames, request.interpolation_factor)
-            finally:
+            
+        try:
+            for seg, frames, out_path, seed in seg_frames:
+                if interp_engine:
+                    frames = interp_engine.interpolate(frames, request.interpolation_factor)
+
+                seg_result = VideoEngine.encode(
+                    frames=frames,
+                    out_path=out_path,
+                    fps=request.fps,
+                    seed=seed,
+                    requested_frames=request.num_frames,
+                )
+                
+                if seg_dir is not None and seg_result.success:
+                    seg_result = self._relocate_result(seg_result, seg_dir, seg.index, "mp4")
+                    
+                results.append(seg_result)
+                LOG.info(
+                    f"GenerationManager: Video segment {seg.index + 1}/{plan.segment_count} done. "
+                    f"path={seg_result.path}"
+                )
+        finally:
+            if interp_engine:
                 ModelLifecycle.safe_unload(interp_engine)
 
-        # STEP 4: Encode → mp4
-        LOG.info(f"GenerationManager: Encoding {len(frames)} frames to mp4...")
-        return VideoEngine.encode(
-            frames=frames,
-            out_path=out_path,
-            fps=request.fps,
-            seed=seed,
-            requested_frames=request.num_frames,
-        )
+        # Return the first successful result (or last attempt error info)
+        for r in results:
+            if r.success:
+                return r
+        return results[-1] if results else self._video_fail(request, "no segments generated")
+
+    def _generate_video_segment(self):
+        # Deprecated: Video segment logic merged into generate_video to prevent VRAM thrashing
+        pass
 
     # ------------------------------------------------------------------
     # Audio / Document / Presentation / Code — unchanged lifecycle

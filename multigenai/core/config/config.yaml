@@ -60,6 +60,6 @@ sdxl:
 # ---------------------------------------------------------------------------
 prompt:
   max_tokens: 75              # CLIP hard limit (77 − 2 BOS/EOS slots)
-  negative_reserve: 25        # Tokens reserved per segment for the negative prompt
+  negative_reserve: 15        # Tokens reserved per segment for the negative prompt
   segmentation_mode: semantic # semantic | sentence | word
   expansion: true             # Enrich sparse segments with context tokens
