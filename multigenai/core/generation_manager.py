@@ -170,6 +170,9 @@ class GenerationManager:
 
         seg_dir = self._segmented_dir(plan.run_id) if plan.is_multi_segment else None
 
+        # Reset scene memory at the start of a generation plan
+        self._ctx.scene_memory.reset()
+
         # STEP 1: Generate all conditioning frames
         conditioning_paths = []
         if conditioning_image_path:
@@ -178,6 +181,7 @@ class GenerationManager:
             LOG.info("GenerationManager: No initial conditioning image. Booting ImageEngine for all segments...")
             from multigenai.engines.image_engine.engine import ImageEngine
             from multigenai.llm.schema_validator import ImageGenerationRequest
+            from PIL import Image
             
             original_unload = self._ctx.behaviour.auto_unload_after_gen
             self._ctx.behaviour.auto_unload_after_gen = False
@@ -185,8 +189,15 @@ class GenerationManager:
             try:
                 image_engine = ImageEngine(self._ctx)
                 for seg in plan.segments:
+                    scene_state = self._ctx.scene_memory.get()
+                    
+                    # Enrich segment prompt with remembered environment
+                    seg_prompt = seg.positive
+                    if scene_state.environment_prompt:
+                        seg_prompt += ", " + scene_state.environment_prompt
+                        
                     image_req = ImageGenerationRequest(
-                        prompt=seg.positive,
+                        prompt=seg_prompt,
                         negative_prompt=seg.negative,
                         width=request.width,
                         height=request.height,
@@ -198,10 +209,24 @@ class GenerationManager:
                     # STRICT P9 token enforcement: ensure PromptCompiler additions fit
                     compiled_pos = processor._budget_mgr.trim_positive(compiled_pos)
                     
-                    img_result = image_engine.run(compiled_pos, seg.negative, image_req)
+                    img_result = image_engine.run(
+                        compiled_pos, 
+                        seg.negative, 
+                        image_req,
+                        ref_image=scene_state.character_reference,
+                        control_image=scene_state.reference_frame
+                    )
+                    
                     if not img_result.success:
                         LOG.error(f"GenerationManager: Conditioning frame failed: {img_result.error}")
                         return self._video_fail(request, img_result.error)
+                    
+                    # Store images in SceneMemory for successive segment consistency
+                    img_obj = Image.open(img_result.path).convert("RGB")
+                    if scene_state.character_reference is None:
+                        self._ctx.scene_memory.update(character_reference=img_obj)
+                    self._ctx.scene_memory.update(reference_frame=img_obj)
+                        
                     conditioning_paths.append(img_result.path)
             finally:
                 self._ctx.behaviour.auto_unload_after_gen = original_unload
@@ -221,9 +246,21 @@ class GenerationManager:
         try:
             video_engine = VideoEngine(self._ctx)
             for seg, c_path in zip(plan.segments, conditioning_paths):
-                seg_request = request.model_copy(update={"prompt": seg.positive})
+                scene_state = self._ctx.scene_memory.get()
+                
+                # Enrich segment prompt with remembered environment
+                seg_prompt = seg.positive
+                if scene_state.environment_prompt:
+                    seg_prompt += ", " + scene_state.environment_prompt
+                    
+                seg_request = request.model_copy(update={"prompt": seg_prompt})
                 frames, out_path, seed = video_engine.generate_frames(seg_request, c_path)
                 seg_frames.append((seg, frames, out_path, seed))
+                
+                # Push the last generated keyframe into SceneMemory to serve as the 
+                # semantic & structural 'reference_frame' for the next generated segment
+                if frames:
+                    self._ctx.scene_memory.update(reference_frame=frames[-1])
         except Exception as exc:
             LOG.error(f"GenerationManager: VideoEngine failed: {exc}", exc_info=True)
             return self._video_fail(request, str(exc))

@@ -117,6 +117,12 @@ class ImageEngine:
         # Diffusion models bypass ModelRegistry by design (Phase 7 isolation model)
         self.pipe = None
         self.refiner = None
+        self._controlnet_enabled = False
+
+        from multigenai.consistency.ip_adapter_manager import IPAdapterManager
+        from multigenai.consistency.controlnet_manager import ControlNetManager
+        self.ip_adapter_manager = IPAdapterManager(self.device)
+        self.controlnet_manager = ControlNetManager(self.device)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -126,7 +132,7 @@ class ImageEngine:
         """Translate short alias to a valid HuggingFace repo id."""
         return MODEL_ALIASES.get(model_name, model_name)
 
-    def _load_model(self, model_name: str) -> None:
+    def _load_model(self, model_name: str, use_controlnet: bool = False, use_ip_adapter: bool = False) -> None:
         """
         Loads the base diffusion model with memory optimizations applied.
 
@@ -144,17 +150,35 @@ class ImageEngine:
         is_xl = "xl" in repo_id.lower()
 
         if self.pipe is not None:
-            return  # Model is already cached from a previous request
+            if self._controlnet_enabled != use_controlnet:
+                from multigenai.core.model_lifecycle import ModelLifecycle
+                LOG.info(f"Configuration change detected (ControlNet: {self._controlnet_enabled} -> {use_controlnet}). Reloading model.")
+                ModelLifecycle.safe_unload(self.pipe)
+                self.pipe = None
+            else:
+                return  # Model is correctly cached
 
         if is_xl:
-            from diffusers import StableDiffusionXLPipeline
-            LOG.info(f"Loading SDXL model {repo_id} (fp16)...")
-            self.pipe = StableDiffusionXLPipeline.from_pretrained(
-                repo_id,
-                torch_dtype=torch.float16,
-                variant="fp16",
-                use_safetensors=True,
-            )
+            if use_controlnet:
+                from diffusers import StableDiffusionXLControlNetPipeline
+                LOG.info(f"Loading SDXL ControlNet Base model {repo_id} (fp16)...")
+                self.controlnet_manager.load() 
+                self.pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
+                    repo_id,
+                    controlnet=self.controlnet_manager.controlnet,
+                    torch_dtype=torch.float16,
+                    variant="fp16",
+                    use_safetensors=True,
+                )
+            else:
+                from diffusers import StableDiffusionXLPipeline
+                LOG.info(f"Loading SDXL model {repo_id} (fp16)...")
+                self.pipe = StableDiffusionXLPipeline.from_pretrained(
+                    repo_id,
+                    torch_dtype=torch.float16,
+                    variant="fp16",
+                    use_safetensors=True,
+                )
         else:
             from diffusers import StableDiffusionPipeline
             LOG.info(f"Loading SD 1.x model {repo_id} (fp16)...")
@@ -164,7 +188,13 @@ class ImageEngine:
                 use_safetensors=True,
             )
 
+        # Apply IP-Adapter weights to pipeline if requested
+        if use_ip_adapter:
+            self.ip_adapter_manager.load(self.pipe)
+
+        # Apply generic diffusers VRAM optimisations
         self.pipe = _apply_memory_optimizations(self.pipe, self.device)
+        self._controlnet_enabled = use_controlnet
 
     def _generate(
         self,
@@ -173,6 +203,8 @@ class ImageEngine:
         request: "ImageGenerationRequest",
         generator: "_torch.Generator",
         seed: int,
+        ref_image: Optional["PILImage.Image"] = None,
+        control_image: Optional["PILImage.Image"] = None,
     ) -> "PILImage":
         """
         Executes the base generation pass.
@@ -187,6 +219,15 @@ class ImageEngine:
             f"Base Generation: {request.num_inference_steps} steps, "
             f"{request.width}x{request.height}, seed={seed}"
         )
+        
+        # Build dynamic kwargs for ControlNet / IP-Adapter payloads
+        kwargs = {}
+        if control_image is not None and self.controlnet_manager.depth_estimator is not None:
+            kwargs["image"] = self.controlnet_manager.get_depth_map(control_image)
+            
+        if ref_image is not None:
+            kwargs.update(self.ip_adapter_manager.apply(self.pipe, ref_image))
+            
         result = self.pipe(
             prompt=compiled_prompt,
             negative_prompt=negative_prompt,
@@ -195,6 +236,7 @@ class ImageEngine:
             generator=generator,
             num_inference_steps=request.num_inference_steps,
             output_type="latent" if request.use_refiner else "pil",
+            **kwargs
         )
         return result.images[0]
 
@@ -253,6 +295,8 @@ class ImageEngine:
         compiled_prompt: str,
         negative_prompt: str,
         request: "ImageGenerationRequest",
+        ref_image: Optional["PILImage.Image"] = None,
+        control_image: Optional["PILImage.Image"] = None,
     ) -> ImageResult:
         """
         Main execution flow.
@@ -273,10 +317,22 @@ class ImageEngine:
         out_path = self._out_dir / f"{img_slug}-{seed}.png"
 
         try:
-            self._load_model(request.model_name)
+            self._load_model(
+                request.model_name, 
+                use_controlnet=(control_image is not None),
+                use_ip_adapter=(ref_image is not None)
+            )
 
             # Base generation pass
-            image = self._generate(compiled_prompt, negative_prompt, request, generator, seed)
+            image = self._generate(
+                compiled_prompt, 
+                negative_prompt, 
+                request, 
+                generator, 
+                seed,
+                ref_image=ref_image,
+                control_image=control_image
+            )
 
             # Drop base before allocating refiner if forced to unload
             if request.use_refiner:

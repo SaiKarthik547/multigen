@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from multigenai.memory.world_state import WorldStateEngine
     from multigenai.memory.style_registry import StyleRegistry
     from multigenai.memory.embedding_store import EmbeddingStore
+    from multigenai.consistency.scene_memory import SceneMemory
 
 
 @dataclass
@@ -46,6 +47,7 @@ class ExecutionContext:
         capability:       Capability report data dict.
         llm_provider:     Optional LLM backend (None → rule-based fallback).
         environment:      Detected EnvironmentProfile (platform, vram, behaviour).
+        scene_memory:     Scene state for multi-segment generation (Phase 10).
     """
     settings: "Settings"
     device: str
@@ -58,6 +60,7 @@ class ExecutionContext:
     capability: dict = field(default_factory=dict)
     llm_provider: Optional["LLMProvider"] = field(default=None)
     environment: Optional["EnvironmentProfile"] = field(default=None)
+    scene_memory: "SceneMemory" = field(default_factory=lambda: __import__('multigenai.consistency.scene_memory', fromlist=['SceneMemory']).SceneMemory())
 
     # ------------------------------------------------------------------
     # Convenience aliases
