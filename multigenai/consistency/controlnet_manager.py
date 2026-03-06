@@ -19,7 +19,7 @@ class ControlNetManager:
         """Lazy load the ControlNet model and Depth Estimator components."""
         import torch
         from diffusers import ControlNetModel
-        from transformers import DPTImageProcessor, DPTForDepthEstimation
+        from transformers import AutoImageProcessor, AutoModelForDepthEstimation
         
         if self.controlnet is not None:
              return
@@ -32,11 +32,11 @@ class ControlNetManager:
             use_safetensors=True
         ).to(self.device)
         
-        self.depth_estimator = DPTForDepthEstimation.from_pretrained(
+        self.depth_estimator = AutoModelForDepthEstimation.from_pretrained(
             "LiheYoung/depth-anything-small-hf"
         ).to("cpu")
         
-        self.feature_extractor = DPTImageProcessor.from_pretrained(
+        self.feature_extractor = AutoImageProcessor.from_pretrained(
             "LiheYoung/depth-anything-small-hf"
         )
 
@@ -56,6 +56,9 @@ class ControlNetManager:
         
         with torch.no_grad():
             depth_map = self.depth_estimator(image_tensor).predicted_depth
+        
+        if isinstance(depth_map, tuple):
+            depth_map = depth_map[0]
 
         w, h = image.size
         depth_map = torch.nn.functional.interpolate(
@@ -67,7 +70,7 @@ class ControlNetManager:
         
         depth_min = torch.amin(depth_map, dim=[1, 2, 3], keepdim=True)
         depth_max = torch.amax(depth_map, dim=[1, 2, 3], keepdim=True)
-        depth_map = (depth_map - depth_min) / (depth_max - depth_min)
+        depth_map = (depth_map - depth_min) / (depth_max - depth_min + 1e-8)
         depth_image_tensor = torch.cat([depth_map] * 3, dim=1)
 
         depth_image_tensor = depth_image_tensor.permute(0, 2, 3, 1).cpu().numpy()[0]

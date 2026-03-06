@@ -53,6 +53,7 @@ class GenerationManager:
 
     def __init__(self, ctx) -> None:
         self._ctx = ctx
+        self.image_engine = None
 
     # ------------------------------------------------------------------
     # Phase 9 helper — build PromptProcessor from context settings
@@ -93,11 +94,11 @@ class GenerationManager:
         results: List["ImageResult"] = []
         seg_dir = self._segmented_dir(plan.run_id) if plan.is_multi_segment else None
         
-        engine = None
+        if self.image_engine is None:
+            self.image_engine = ImageEngine(self._ctx)
+        engine = self.image_engine
+        
         try:
-            # P9 Optimization: load model ONCE per plan, not per segment
-            engine = ImageEngine(self._ctx)
-            
             for seg in plan.segments:
                 # Build a per-segment request with the processed prompts
                 seg_request = request.model_copy(update={"prompt": seg.positive})
@@ -130,6 +131,7 @@ class GenerationManager:
             self._ctx.behaviour.auto_unload_after_gen = original_unload
             if engine and original_unload:
                 ModelLifecycle.safe_unload(engine)
+                self.image_engine = None
 
         # Return the first successful result (or the last attempt for error info)
         for r in results:
@@ -185,9 +187,12 @@ class GenerationManager:
             
             original_unload = self._ctx.behaviour.auto_unload_after_gen
             self._ctx.behaviour.auto_unload_after_gen = False
-            image_engine = None
+            
+            if self.image_engine is None:
+                self.image_engine = ImageEngine(self._ctx)
+            image_engine = self.image_engine
+            
             try:
-                image_engine = ImageEngine(self._ctx)
                 for seg in plan.segments:
                     scene_state = self._ctx.scene_memory.get()
                     
@@ -232,6 +237,7 @@ class GenerationManager:
                 self._ctx.behaviour.auto_unload_after_gen = original_unload
                 if image_engine and original_unload:
                     ModelLifecycle.safe_unload(image_engine)
+                    self.image_engine = None
 
         # STEP 2: SVD-XT Keyframes (Load VideoEngine once)
         LOG.info("GenerationManager: Booting isolated VideoEngine (SVD-XT) for all segments...")

@@ -95,11 +95,13 @@ class NegativePromptManager:
                 f"({total_tokens}/{reserve} tokens). Single segment."
             )
         else:
-            self._segments = self._mgr.split_negative(self._master_negative)
+            # Over-budget negative prompts are trimmed to fit (Phase 10 optimization)
+            # This 'removes segmentation overhead' and ensures a single negative pass.
+            trimmed = self._mgr.trim_negative(self._master_negative)
+            self._segments = [trimmed]
             LOG.warning(
                 f"NegativePromptManager: master negative ({total_tokens} tokens) "
-                f"exceeds reserve ({reserve}). Split into {len(self._segments)} segment(s) "
-                f"— rotating across positive segments."
+                f"exceeds reserve ({reserve}). Trimmed to fit (no segmentation overhead)."
             )
 
         return self._segments
@@ -139,15 +141,18 @@ class NegativePromptManager:
         Model-specific additions are appended for SDXL-family models.
         Duplicates are de-duplicated at phrase level.
         """
-        parts = [_BASE_NEGATIVE]
+        parts = []
+
+        # User-supplied tokens (Highest Priority)
+        if user_negative and user_negative.strip():
+            parts.append(user_negative.strip())
 
         # SDXL-specific additions
         if "sdxl" in self._model_name or "stable-diffusion-xl" in self._model_name:
             parts.append("deformed, disfigured, bad proportions")
 
-        # User-supplied tokens
-        if user_negative and user_negative.strip():
-            parts.append(user_negative.strip())
+        # Generic Base Negatives (Lowest Priority)
+        parts.append(_BASE_NEGATIVE)
 
         combined = ", ".join(parts)
 

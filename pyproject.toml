@@ -23,6 +23,7 @@ dependencies = [
     "opencv-python-headless",
     "insightface==0.7.3",
     "onnxruntime>=1.17.0",
+    "requests==2.32.4",
 ]
 
 [project.optional-dependencies]

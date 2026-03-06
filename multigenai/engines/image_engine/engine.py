@@ -118,6 +118,7 @@ class ImageEngine:
         self.pipe = None
         self.refiner = None
         self._controlnet_enabled = False
+        self._ip_adapter_enabled = False
 
         from multigenai.consistency.ip_adapter_manager import IPAdapterManager
         from multigenai.consistency.controlnet_manager import ControlNetManager
@@ -150,9 +151,12 @@ class ImageEngine:
         is_xl = "xl" in repo_id.lower()
 
         if self.pipe is not None:
-            if self._controlnet_enabled != use_controlnet:
+            if (
+                self._controlnet_enabled != use_controlnet
+                or self._ip_adapter_enabled != use_ip_adapter
+            ):
                 from multigenai.core.model_lifecycle import ModelLifecycle
-                LOG.info(f"Configuration change detected (ControlNet: {self._controlnet_enabled} -> {use_controlnet}). Reloading model.")
+                LOG.info("Pipeline configuration changed. Reloading model.")
                 ModelLifecycle.safe_unload(self.pipe)
                 self.pipe = None
             else:
@@ -191,10 +195,27 @@ class ImageEngine:
         # Apply IP-Adapter weights to pipeline if requested
         if use_ip_adapter:
             self.ip_adapter_manager.load(self.pipe)
+            if hasattr(self.pipe, "set_ip_adapter_scale"):
+                self.pipe.set_ip_adapter_scale(0.6)
 
-        # Apply generic diffusers VRAM optimisations
-        self.pipe = _apply_memory_optimizations(self.pipe, self.device)
+        # --- Apply memory optimizations ---
+        if self.device == "cuda":
+            self.pipe.enable_model_cpu_offload()
+        else:
+            self.pipe = self.pipe.to(self.device)
+
+        LOG.info("Apply VAE slicing")
+        self.pipe.vae.enable_slicing()
+        self.pipe.vae.enable_tiling()
+
+        # Attention slicing breaks IP-Adapter processors
+        if not use_ip_adapter:
+            self.pipe.enable_attention_slicing()
+        else:
+            LOG.info("Skip attention slicing")
+            
         self._controlnet_enabled = use_controlnet
+        self._ip_adapter_enabled = use_ip_adapter
 
     def _generate(
         self,
@@ -220,24 +241,41 @@ class ImageEngine:
             f"{request.width}x{request.height}, seed={seed}"
         )
         
-        # Build dynamic kwargs for ControlNet / IP-Adapter payloads
-        kwargs = {}
-        if control_image is not None and self.controlnet_manager.depth_estimator is not None:
+        # Build dynamic kwargs for ControlNet / IP-Adapter — refactored for Phase 10 stability
+        # SDXL + ControlNet + IP-Adapter can be fragile if args are mixed naively.
+        kwargs = {
+            "prompt": compiled_prompt,
+            "negative_prompt": negative_prompt,
+            "width": request.width,
+            "height": request.height,
+            "generator": generator,
+            "num_inference_steps": request.num_inference_steps,
+            "guidance_scale": 7.5,
+            "output_type": "latent" if request.use_refiner else "pil",
+        }
+
+        if control_image is not None:
+            # Generate depth map for structural conditioning
             kwargs["image"] = self.controlnet_manager.get_depth_map(control_image)
             
         if ref_image is not None:
-            kwargs.update(self.ip_adapter_manager.apply(self.pipe, ref_image))
+            kwargs["ip_adapter_image"] = ref_image
+
+        # --- Normalize IP Adapter input ---
+        if "ip_adapter_image" in kwargs:
+            ip_img = kwargs["ip_adapter_image"]
+            if isinstance(ip_img, (list, tuple)):
+                ip_img = ip_img[0]
+            kwargs["ip_adapter_image"] = ip_img
+
+        # --- Normalize ControlNet image ---
+        if "image" in kwargs:
+            ctrl_img = kwargs["image"]
+            if isinstance(ctrl_img, (list, tuple)):
+                ctrl_img = ctrl_img[0]
+            kwargs["image"] = ctrl_img
             
-        result = self.pipe(
-            prompt=compiled_prompt,
-            negative_prompt=negative_prompt,
-            width=request.width,
-            height=request.height,
-            generator=generator,
-            num_inference_steps=request.num_inference_steps,
-            output_type="latent" if request.use_refiner else "pil",
-            **kwargs
-        )
+        result = self.pipe(**kwargs)
         return result.images[0]
 
     def _refine(
@@ -269,14 +307,19 @@ class ImageEngine:
             )
             self.refiner = _apply_memory_optimizations(self.refiner, self.device)
 
-        LOG.info(f"Refining image ({request.num_inference_steps} steps, strength=0.2)...")
+        LOG.info(f"Refining image (20 steps, strength=0.15)...")
+        
+        # Stability fix: Do NOT manually move VAE to float32 if pipeline is float16.
+        # This prevents the "Input type (Half) and bias type (float) should be the same" crash.
+        # We rely on Diffusers to handle precision, or keep it in fp16 for T4 speed.
+        
         refined = self.refiner(
             prompt=compiled_prompt,
             negative_prompt=negative_prompt,
             image=image,
             generator=generator,           # same CPU generator — ensures determinism
-            num_inference_steps=request.num_inference_steps,
-            strength=0.2,
+            num_inference_steps=20,
+            strength=0.15,
         )
 
         # Immediate teardown if required — otherwise keep alive for next segment
