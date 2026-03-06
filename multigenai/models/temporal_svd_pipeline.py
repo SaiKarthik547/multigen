@@ -37,12 +37,24 @@ class TemporalStableVideoDiffusionPipeline(StableVideoDiffusionPipeline):
         )
 
     @torch.no_grad()
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args, return_latents=False, **kwargs):
         """
-        Wraps the call to ensure latents are captured if requested.
+        Wraps the call to ensure 5D diffusion latents are captured before VAE decoding.
+        
+        Args:
+            return_latents: If True, returns a tuple (output, latents).
         """
-        # The standard UNet loop in SVD doesn't return latents, 
-        # but we can capture them if the output_type is 'latent'.
-        # For simplicity in this implementation, we rely on prepare_latents 
-        # override and standard return logic.
-        return super().__call__(*args, **kwargs)
+        # Force output_type to "latent" to get the 5D diffusion tensor
+        # [batch, frames, channels, height/8, width/8]
+        output = super().__call__(*args, output_type="latent", **kwargs)
+        
+        latents = output.frames
+        
+        # Ensure it's 5D (batch, frames, channels, h, w)
+        if latents.ndim == 4:
+            latents = latents.unsqueeze(1)
+            
+        if return_latents:
+            return output, latents
+            
+        return output

@@ -141,10 +141,16 @@ class VideoEngine:
 
         # Safety Guard: Falls back if latent dimensions mismatch (e.g. frame count change)
         if previous_latent is not None:
-            # SVD-XT latents shape: [batch, frames, channels, height, width]
-            if previous_latent.shape[2] != num_frames:
+            # SVD-XT diffusion latents shape: [batch, frames, channels, height/8, width/8]
+            if previous_latent.ndim != 5:
+                LOG.warning(f"Invalid latent rank: expected 5D, got {previous_latent.ndim}D. Resetting temporal state.")
+                previous_latent = None
+            elif previous_latent.shape[1] != num_frames:
                 LOG.warning(f"Latent shape mismatch: expected {num_frames} frames, got {previous_latent.shape[1]}. Resetting temporal state.")
                 previous_latent = None
+
+        if previous_latent is not None:
+            LOG.info(f"Temporal latent tensor shape: {previous_latent.shape}")
 
         # First pass: Generate the frames
         # Uses frame_generator (original seed)
@@ -164,9 +170,10 @@ class VideoEngine:
         
         frames = output.frames[0]
 
-        # Second pass: Capture final latents
+        # Second pass: Capture final diffusion latents for propagation
         # Uses latent_generator (seed + 1) to prevent noise correlation
-        latent_output = self.pipe(
+        # We use return_latents=True to get the 5D diffusion tensor
+        _, final_latent = self.pipe(
             image=conditioning_image,
             num_frames=num_frames,
             num_inference_steps=request.num_inference_steps,
@@ -175,11 +182,10 @@ class VideoEngine:
             generator=latent_generator,
             motion_bucket_id=motion_bucket,
             decode_chunk_size=2,
-            output_type="latent",
             latents=previous_latent,
+            return_latents=True,
             return_dict=True
         )
-        final_latent = latent_output.frames[0] 
         
         return frames, final_latent
 
