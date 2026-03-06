@@ -159,6 +159,9 @@ class GenerationManager:
         from multigenai.creative.scene_designer import SceneDesigner
         from multigenai.creative.prompt_compiler import PromptCompiler
         from multigenai.core.model_lifecycle import ModelLifecycle
+        from multigenai.core.temporal_state import TemporalState
+        from multigenai.engines.motion_engine.motion_estimator import MotionEstimator
+        from multigenai.engines.transition_engine.engine import TransitionEngine
         from PIL import Image
 
         # --- Phase 9: process prompt ---
@@ -250,6 +253,10 @@ class GenerationManager:
         original_unload = self._ctx.behaviour.auto_unload_after_gen
         self._ctx.behaviour.auto_unload_after_gen = False
         video_engine = None
+        motion_estimator = MotionEstimator(device=self._ctx.device)
+        
+        # Phase 11: Temporal State Tracking
+        temporal_state = TemporalState()
         
         # Tuple of (segment, frames, out_path, seed)
         seg_frames = []
@@ -264,13 +271,37 @@ class GenerationManager:
                     seg_prompt += ", " + scene_state.environment_prompt
                     
                 seg_request = request.model_copy(update={"prompt": seg_prompt})
-                frames, out_path, seed = video_engine.generate_frames(seg_request, c_path)
+                
+                # Phase 11: Motion-guided warping
+                if temporal_state.previous_frame is not None:
+                    LOG.info(f"GenerationManager: Estimating motion for scene continuity...")
+                    init_image = Image.open(c_path).convert("RGB")
+                    flow = motion_estimator.estimate(temporal_state.previous_frame, init_image)
+                    if flow is not None:
+                        warped_c = MotionEstimator.warp_frame(temporal_state.previous_frame, flow)
+                        # Save warped conditioning image to a temporary file
+                        c_path = str(pathlib.Path(c_path).with_name(f"warped_{pathlib.Path(c_path).name}"))
+                        warped_c.save(c_path)
+                
+                frames, final_latent, out_path, seed = video_engine.generate_frames(
+                    seg_request, 
+                    c_path,
+                    previous_latent=temporal_state.previous_latent
+                )
                 seg_frames.append((seg, frames, out_path, seed))
                 
-                # Push the last generated keyframe into SceneMemory to serve as the 
-                # semantic & structural 'reference_frame' for the next generated segment
+                # Phase 11: Update Temporal State
                 if frames:
-                    self._ctx.scene_memory.update(reference_frame=frames[-1])
+                    temporal_state.previous_frame = frames[-1]
+                    temporal_state.previous_latent = final_latent
+                    temporal_state.scene_index += 1
+                    
+                    # Push the last generated keyframe into SceneMemory to serve as the 
+                    # semantic & structural 'reference_frame' for the next generated segment
+                    self._ctx.scene_memory.update(
+                        reference_frame=frames[-1],
+                        temporal_state=temporal_state
+                    )
         except Exception as exc:
             LOG.error(f"GenerationManager: VideoEngine failed: {exc}", exc_info=True)
             return self._video_fail(request, str(exc))
@@ -292,26 +323,51 @@ class GenerationManager:
             interp_engine = InterpolationEngine(self._ctx)
             
         try:
-            for seg, frames, out_path, seed in seg_frames:
-                if interp_engine:
-                    frames = interp_engine.interpolate(frames, request.interpolation_factor)
-
+            # Phase 11: Scene Transition Blending
+            if plan.is_multi_segment and len(seg_frames) > 1:
+                LOG.info("GenerationManager: Applying temporal alpha-blending across scene boundaries...")
+                final_frames = []
+                for i in range(len(seg_frames)):
+                    seg, frames, out_path, seed = seg_frames[i]
+                    if interp_engine:
+                        frames = interp_engine.interpolate(frames, request.interpolation_factor)
+                    
+                    if not final_frames:
+                        final_frames = frames
+                    else:
+                        final_frames = TransitionEngine.blend(final_frames, frames, window=4)
+                
+                # Treat as one giant sequence for encoding
+                seg, _, out_path, seed = seg_frames[0]
                 seg_result = VideoEngine.encode(
-                    frames=frames,
+                    frames=final_frames,
                     out_path=out_path,
                     fps=request.fps,
                     seed=seed,
-                    requested_frames=request.num_frames,
+                    requested_frames=request.num_frames * plan.segment_count,
                 )
-                
-                if seg_dir is not None and seg_result.success:
-                    seg_result = self._relocate_result(seg_result, seg_dir, seg.index, "mp4")
-                    
                 results.append(seg_result)
-                LOG.info(
-                    f"GenerationManager: Video segment {seg.index + 1}/{plan.segment_count} done. "
-                    f"path={seg_result.path}"
-                )
+            else:
+                for seg, frames, out_path, seed in seg_frames:
+                    if interp_engine:
+                        frames = interp_engine.interpolate(frames, request.interpolation_factor)
+
+                    seg_result = VideoEngine.encode(
+                        frames=frames,
+                        out_path=out_path,
+                        fps=request.fps,
+                        seed=seed,
+                        requested_frames=request.num_frames,
+                    )
+                    
+                    if seg_dir is not None and seg_result.success:
+                        seg_result = self._relocate_result(seg_result, seg_dir, seg.index, "mp4")
+                        
+                    results.append(seg_result)
+                    LOG.info(
+                        f"GenerationManager: Video segment {seg.index + 1}/{plan.segment_count} done. "
+                        f"path={seg_result.path}"
+                    )
         finally:
             if interp_engine:
                 ModelLifecycle.safe_unload(interp_engine)

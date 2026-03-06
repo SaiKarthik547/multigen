@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 from PIL import Image as PILImage
+from multigenai.core.temporal_state import TemporalState
 
 @dataclass
 class SceneState:
@@ -9,6 +10,7 @@ class SceneState:
     environment_prompt: Optional[str] = None
     lighting_prompt: Optional[str] = None
     style_prompt: Optional[str] = None
+    temporal_state: Optional[TemporalState] = None
 
 class SceneMemory:
     """

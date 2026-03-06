@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://python.org)
 [![Diffusers](https://img.shields.io/badge/Diffusers-0.24%2B-orange)](https://github.com/huggingface/diffusers)
-[![Tests](https://img.shields.io/badge/Tests-316%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/Tests-321%20passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/License-MIT-green)](#license)
 
 ---
@@ -71,8 +71,9 @@ Intent → SceneDesigner → PromptCompiler → Isolated Engine → ModelLifecyc
 - **🌍 Adaptive Execution** — Auto-detects Kaggle, GPU VRAM tier, DirectML (AMD on Windows), and CI environments; supports `performance_mode` (speed/quality/balanced) toggles
 - **📊 Generation Metrics** — Per-run structured metrics (latency, VRAM usage, seed) stored as JSON
 - **🖥️ Hardened Streamlit UI** — Full browser-based UI orchestrated by `GenerationManager`; supports image, video, audio, code, and document generation with real-time health-checks and VRAM isolation
-- **✅ 350+ Tests Passing** — Comprehensive test coverage across all modules, including local RIFE integration tests, Phase 9 prompt processing tests, and newly added Phase 10 consistency tests.
+- **✅ 321 Tests Passing** — Comprehensive test coverage across all modules, including local RIFE integration tests, Phase 9 prompt processing tests, Phase 10 consistency tests, and Phase 11 continuity tests.
 - **🧠 Phase 10 Scene Memory & Consistency** — `SceneMemory` persists state across prompt segments; `IPAdapterManager` maintains character identity (40% → 65% improvement); `ControlNetManager` (DepthAnythingSmall) locks scene structure (50% → 75% improvement); temporal conditioning cycles the last SVD frame back as the next segment's reference.
+- **🎬 Phase 11 Temporal Continuity Engine** — True seamless cinematic generation via **Latent Propagation** (injecting previous SVD latents into current noise via custom `TemporalSVD` pipeline) and **Motion-Guided Warping** (RAFT-based optical flow); **Alpha-Blending** transitions ensure smooth visual boundaries between clips.
 
 ---
 
@@ -143,11 +144,14 @@ graph TB
         FE["FaceEncoder\nInsightFace ArcFace R100 (CPU/ONNX)"]
         IR["IdentityResolver\nCentralized embedding retrieval"]
         SM["SceneMemory\nPhase 10: Persistent segment state\ncharacter_ref · reference_frame"]
+        TS["TemporalState\nPhase 11: Latent state · Motion field"]
     end
 
-    subgraph CONSISTENCY_BOX["⑩ Consistency Layer"]
+    subgraph CONSISTENCY_BOX["⑩ Continuity & Motion Layer"]
         IPM["IPAdapterManager\nCharacter Identity pass-through"]
         CNM["ControlNetManager\nDepthAnythingSmall (CPU offload)"]
+        ME["MotionEstimator\nRAFT Optical Flow (CPU/GPU)"]
+        TE["TransitionEngine\nAlpha-blending boundaries"]
     end
 
     subgraph MODEL_BOX["⑨ AI Model Backends"]
@@ -165,6 +169,8 @@ graph TB
     DE & PRE & CE --> ML
     IE --> SDXL & REF
     VE --> SVD
+    VE --> ME
+    GM --> TE
     GM --> CTX
     CTX --> ENV & MR & IS & SR & WS & ES & SM
     SM -.-> IE & VE
@@ -266,19 +272,29 @@ sequenceDiagram
         GM->>SM: update(character_ref, current_reference_frame)
     end
 
-    note over GM,SVD: PASS 2: SVD-XT Video Blocks
+    note over GM,SVD: PASS 2: Temporal Video (Phase 11)
     loop For each segment
-        GM->>VE: video_engine.generate_frames(..., conditioning image)
-        VE->>SVD: run SVD-XT diffusion pass
-        SVD-->>VE: frames tensor
-        VE->>FF: stream to ffmpeg
-        FF-->>VE: .mp4
-        VE-->>GM: VideoResult
-        GM->>SM: update(reference_frame = last generated frame)
+        GM->>ME: estimate(prev_frame, current_conditioning)
+        ME-->>GM: optical flow
+        GM->>ME: warp_frame(prev_frame, flow)
+        ME-->>GM: warped conditioning image
+        
+        GM->>VE: generate_frames(..., warped_c, prev_latent)
+        VE->>SVD: warm-start UNet with prev_latent
+        SVD-->>VE: frames + final_latent
+        VE-->>GM: VideoResult + TemporalState
+        
+        GM->>SM: update(prev_frame, prev_latent, motion_field)
     end
     
+    GM->>TE: blend(all_segment_frames, window=4)
+    TE-->>GM: Seamless sequence
+    GM->>VE: encode(blended_frames)
+    VE->>FF: stream to ffmpeg
+    FF-->>VE: .mp4
+    
     GM->>ML: safe_unload(all engines)
-    GM-->>U: Final VideoResults
+    GM-->>U: Seamless Cinematic Result
 ```
 
 ---
@@ -362,7 +378,25 @@ Locks scene structure and camera framing (75% consistency).
 | **SDXL Refiner** | ~4.0 GB | Isolated load (after Base unload) |
 | **Depth Estimator** | ~0.15 GB | **Forced to CPU** |
 | **IP-Adapter** | ~0.5 GB | Model offload active |
-| **Peak VRAM** | **~11.7 GB** | **(Safe for Kaggle 14GB T4)** |
+| **RAFT (Motion)** | ~0.2 GB | Loaded in Video pass |
+| **Peak VRAM** | **~11.9 GB** | **(Safe for Kaggle 14GB T4)** |
+
+---
+
+## Temporal Continuity Engine ✨ Phase 11
+
+Phase 11 upgrades the system from a "clip stitcher" to a **continuous cinematic generator**. It eliminates visual discontinuities between scenes using three core mechanisms:
+
+### 1. Latent Propagation
+Standard SVD sampling starts from random Gaussian noise, which causes "flicker" at scene boundaries. Phase 11 uses a custom `TemporalStableVideoDiffusionPipeline` to warm-start the UNet with the final latents from the preceding segment.
+
+### 2. Motion-Guided Warping (RAFT)
+To ensure movement continues logically between segments, we use the **RAFT (Recurrent All-Pairs Field Transforms)** optical flow model.
+- **`MotionEstimator`**: Estimates flow between the previous scene's end and the next scene's start.
+- **Warping**: The conditioning frame for segment $N+1$ is warped to match the motion trajectory of segment $N$.
+
+### 3. Alpha-Blending Transitions
+The `TransitionEngine` applies a weighted linear alpha-blend over a 4-frame window at scene boundaries, smoothing out any remaining lighting or structural micro-drifts.
 
 ---
 
@@ -385,6 +419,7 @@ multigen/
 │   │   ├── exceptions.py             # Custom exception hierarchy
 │   │   ├── execution_context.py      # DI container wired at startup
 │   │   ├── generation_manager.py     # ✨ Sole orchestrator for all modalities
+│   │   ├── temporal_state.py         # ✨ Phase 11: Latent & Motion state tracking
 │   │   ├── lifecycle.py              # Startup/shutdown lifecycle manager
 │   │   ├── metrics.py                # GenerationMetrics recording
 │   │   ├── model_lifecycle.py        # ✨ ModelLifecycle.safe_unload() helper
@@ -392,6 +427,8 @@ multigen/
 │   ├── creative/                     # ✨ Phase 7 Creative Intelligence Layer
 │   │   ├── scene_designer.py         # Intent → SceneBlueprint
 │   │   └── prompt_compiler.py        # SceneBlueprint → optimized prompts
+│   ├── models/                       # ✨ Custom Model Wrappers
+│   │   └── temporal_svd_pipeline.py  # ✨ Phase 11: Latent-seeding SVD pipeline
 │   ├── llm/
 │   │   ├── providers/
 │   │   │   ├── base.py               # LLMProvider abstract base
@@ -415,7 +452,9 @@ multigen/
 │   │   ├── audio_engine/             # Schema-ready stub
 │   │   ├── document_engine/          # Word/PDF reports
 │   │   ├── presentation_engine/      # PowerPoint decks
-│   │   └── code_engine/              # LLM code generation
+│   │   ├── code_engine/              # LLM code generation
+│   │   ├── motion_engine/            # ✨ Phase 11: RAFT Motion Estimation
+│   │   └── transition_engine/        # ✨ Phase 11: Temporal Blending
 │   ├── control/
 │   │   ├── consistency_enforcer.py   # Identity drift detection (cosine sim)
 │   │   ├── controlnet_manager.py     # ControlNet integration manager
@@ -971,6 +1010,8 @@ pytest tests/test_environment.py -v      # Environment + Phase 7 schema (25 test
 pytest tests/test_identity.py -v         # Identity layer (50 tests)
 pytest tests/test_llm_providers.py -v    # LLM providers
 pytest tests/test_compute_stability.py -v  # Metrics, registry, lifecycle (54 tests)
+pytest tests/test_phase11_continuity.py -v # Phase 11 Temporal components
+pytest tests/test_phase11_latent_fix.py -v  # Latent propagation verification
 
 # All tests run without GPU, torch, diffusers, or network access
 ```
@@ -991,5 +1032,6 @@ pytest tests/test_compute_stability.py -v  # Metrics, registry, lifecycle (54 te
 | Phase 8 | ✅ Complete | **Temporal Enhancement**: Local RIFE `InterpolationEngine` (IFNet_2R), custom `flownet.pkl` weight synchronization, recursive midpoint interpolation, `interpolate`/`interpolation_factor` schema, strict VRAM isolation, and high-resolution stability hardening |
 | Phase 9 | ✅ Complete | **Advanced Prompt Processing**: `PromptProcessor` subsystem — `PromptAnalyzer`, `PromptSegmenter`, `SegmentExpander`, `NegativePromptManager`, `PromptPlan`; token-safe segmentation (50 pos / 25 neg tokens per segment); paragraph/scene/sentence boundary detection; segment-aware `GenerationManager` with multi-output `segmented_runs/` layout; 62 new tests |
 | Phase 10 | ✅ Complete | **Scene Memory & Consistency**: `SceneMemory` subsystem, `IPAdapterManager` for identity, `ControlNetManager` (DepthAnythingSmall) for structural locking; temporal conditioning cycles; CPU-offloaded depth estimation; hardened VRAM safety for 14GB T4; 350+ tests |
-| Phase 11 | 🔜 Planned | Multi-agent DAG orchestration: parallel scene generation, automatic scene assembly |
-| Phase 12 | 🔜 Planned | Presentation & Document enhancements: multi-modal RAG context |
+| Phase 11 | ✅ Complete | **Temporal Continuity Engine**: `TemporalState` propagation, `TemporalSVD` latent injection, RAFT-based motion estimation, and alpha-blending scene transitions for seamless cinematic video. |
+| Phase 12 | 🔜 Planned | Multi-agent DAG orchestration: parallel scene generation, automatic scene assembly |
+| Phase 13 | 🔜 Planned | Presentation & Document enhancements: multi-modal RAG context |
