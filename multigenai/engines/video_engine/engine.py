@@ -126,8 +126,9 @@ class VideoEngine:
         """
         import torch
 
-        # CPU generator: portable across CUDA/CPU/DirectML, same sequence guaranteed
-        generator = torch.Generator(device="cpu").manual_seed(seed)
+        # CPU generators: separate RNG streams to prevent noise correlation between passes
+        frame_generator = torch.Generator(device="cpu").manual_seed(seed)
+        latent_generator = torch.Generator(device="cpu").manual_seed(seed + 1)
         
         # Map temporal_strength (0.0–1.0) to native SVD motion_bucket_id (0–255)
         motion_bucket = max(0, min(255, int(request.temporal_strength * 255)))
@@ -145,18 +146,15 @@ class VideoEngine:
                 LOG.warning(f"Latent shape mismatch: expected {num_frames} frames, got {previous_latent.shape[1]}. Resetting temporal state.")
                 previous_latent = None
 
-        # First pass: Generate the frames and capture the internal latents
-        # We call the pipeline twice or use output_type="latent" if we want just latents,
-        # but standard SVD pipeline returns frames. We need to override the call if we want both efficiently.
-        # For now, we perform the standard call with latents= injection.
-        
+        # First pass: Generate the frames
+        # Uses frame_generator (original seed)
         output = self.pipe(
             image=conditioning_image,
             num_frames=num_frames,
             num_inference_steps=request.num_inference_steps,
             height=request.height,
             width=request.width,
-            generator=generator,
+            generator=frame_generator,
             motion_bucket_id=motion_bucket,
             decode_chunk_size=2,
             output_type="pil",
@@ -166,18 +164,15 @@ class VideoEngine:
         
         frames = output.frames[0]
 
-        # To capture final latents correctly, we run a minimal identical pass with output_type="latent"
-        # or we could have modified the pipeline __call__ to return both. 
-        # Given SVD VRAM constraints, we do a second minimal latent-only pass if the pipeline doesn't return both.
-        # NOTE: In production we'd modify the pipeline once to avoid redundant UNet passes.
-        
+        # Second pass: Capture final latents
+        # Uses latent_generator (seed + 1) to prevent noise correlation
         latent_output = self.pipe(
             image=conditioning_image,
             num_frames=num_frames,
             num_inference_steps=request.num_inference_steps,
             height=request.height,
             width=request.width,
-            generator=generator,
+            generator=latent_generator,
             motion_bucket_id=motion_bucket,
             decode_chunk_size=2,
             output_type="latent",
