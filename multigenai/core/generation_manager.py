@@ -229,21 +229,10 @@ class GenerationManager:
                     # Store images in SceneMemory for successive segment consistency
                     img_obj = Image.open(img_result.path).convert("RGB")
                     
-                    refs = scene_state.character_reference
-
-                    if refs is None:
+                    if scene_state.character_reference is None:
                         # FIRST FRAME IDENTITY CAPTURE
-                        refs = [img_obj]
+                        self._ctx.scene_memory.update(character_reference=img_obj)
                         self._ctx.scene_memory.update(environment_prompt=seg.positive)
-                    else:
-                        if not isinstance(refs, list):
-                            refs = [refs]
-                        
-                        refs = refs.copy()  # CRITICAL
-                        if len(refs) < 3:
-                            refs.append(img_obj)
-                            
-                    self._ctx.scene_memory.update(character_reference=refs)
 
                     # ALWAYS update spatial reference (ControlNet Depth)
                     self._ctx.scene_memory.update(reference_frame=img_obj)

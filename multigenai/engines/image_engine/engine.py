@@ -264,7 +264,7 @@ class ImageEngine:
         # --- Normalize IP Adapter input ---
         if "ip_adapter_image" in kwargs:
             ip_img = kwargs["ip_adapter_image"]
-            if isinstance(ip_img, tuple):
+            if isinstance(ip_img, (list,tuple)):
                 ip_img = list(ip_img)
             kwargs["ip_adapter_image"] = ip_img
 
