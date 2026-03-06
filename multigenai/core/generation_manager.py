@@ -278,7 +278,7 @@ class GenerationManager:
                     init_image = Image.open(c_path).convert("RGB")
                     flow = motion_estimator.estimate(temporal_state.previous_frame, init_image)
                     if flow is not None:
-                        warped_c = MotionEstimator.warp_frame(temporal_state.previous_frame, flow)
+                        warped_c = motion_estimator.warp_frame(temporal_state.previous_frame, flow)
                         # Save warped conditioning image to a temporary file
                         c_path = str(pathlib.Path(c_path).with_name(f"warped_{pathlib.Path(c_path).name}"))
                         warped_c.save(c_path)

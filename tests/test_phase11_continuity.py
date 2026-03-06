@@ -22,8 +22,9 @@ def test_motion_estimator_synthetic():
     
     # Test warping with zero flow
     flow = np.zeros((2, 64, 64), dtype=np.float32)
-    warped = MotionEstimator.warp_frame(img_a, flow)
-    
+    # Test warping
+    warped = estimator.warp_frame(img_a, flow)
+    assert isinstance(warped, Image.Image)
     assert warped.size == img_a.size
     # With zero flow, the warped image should be identical to the original
     assert np.array(warped).shape == (64, 64, 3)

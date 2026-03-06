@@ -56,28 +56,81 @@ class MotionEstimator:
 
         return flow.squeeze(0).cpu().numpy()
 
-    @staticmethod
-    def warp_frame(frame: PILImage.Image, flow: np.ndarray) -> PILImage.Image:
-        """Warp a frame using optical flow motion field."""
-        device = "cpu"
-        img = TF.to_tensor(frame).unsqueeze(0).to(device)
-        flow_torch = torch.from_numpy(flow).unsqueeze(0).to(device)
+    def warp_frame(self, frame: PILImage.Image, flow: np.ndarray) -> PILImage.Image:
+        """
+        Warp frame using RAFT optical flow with stability constraints.
+
+        Args:
+            frame: previous PIL Image
+            flow: RAFT optical flow (2, H, W)
+
+        Returns:
+            warped PIL Image
+        """
+        import cv2
+        import numpy as np
+
+        # Convert PIL to numpy (H, W, 3)
+        frame_np = np.array(frame)
         
-        B, C, H, W = img.size()
+        # Transpose flow from (2, H, W) to (H, W, 2) for OpenCV
+        flow_cv = flow.transpose(1, 2, 0)
+        h, w = flow_cv.shape[:2]
+
+        # -------------------------------
+        # Scene change detection
+        # -------------------------------
+        flow_mag_field = np.sqrt(flow_cv[..., 0]**2 + flow_cv[..., 1]**2)
+        flow_mag = np.mean(flow_mag_field)
         
-        xx = torch.arange(0, W).view(1, -1).repeat(H, 1)
-        yy = torch.arange(0, H).view(-1, 1).repeat(1, W)
-        xx = xx.view(1, 1, H, W).repeat(B, 1, 1, 1)
-        yy = yy.view(1, 1, H, W).repeat(B, 1, 1, 1)
-        grid = torch.cat((xx, yy), 1).float()
-        
-        vgrid = grid + flow_torch
-        
-        # Normalize grid to [-1, 1] for grid_sample
-        vgrid[:, 0, :, :] = 2.0 * vgrid[:, 0, :, :].clone() / max(W - 1, 1) - 1.0
-        vgrid[:, 1, :, :] = 2.0 * vgrid[:, 1, :, :].clone() / max(H - 1, 1) - 1.0
-        
-        vgrid = vgrid.permute(0, 2, 3, 1)
-        warped_img = F.grid_sample(img, vgrid, align_corners=True, padding_mode="reflection")
-        
-        return TF.to_pil_image(warped_img.squeeze(0))
+        LOG.debug(f"MotionEstimator: flow magnitude mean={flow_mag:.2f}")
+
+        if flow_mag > 30:
+            # large camera jump or scene cut
+            LOG.info("MotionEstimator: Large scene change detected — skipping warp")
+            return frame
+
+        # -------------------------------
+        # Clip extreme motion vectors
+        # -------------------------------
+        flow_cv = np.clip(flow_cv, -25.0, 25.0)
+
+        # -------------------------------
+        # Smooth the flow field
+        # -------------------------------
+        flow_cv = cv2.GaussianBlur(flow_cv, (7, 7), 0)
+
+        # -------------------------------
+        # Generate sampling grid
+        # -------------------------------
+        grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
+        map_x = (grid_x + flow_cv[..., 0]).astype(np.float32)
+        map_y = (grid_y + flow_cv[..., 1]).astype(np.float32)
+
+        # -------------------------------
+        # Apply remap
+        # -------------------------------
+        try:
+            warped = cv2.remap(
+                frame_np,
+                map_x,
+                map_y,
+                interpolation=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REFLECT
+            )
+        except Exception as exc:
+            LOG.warning(f"MotionEstimator: Warp failed — returning original frame: {exc}")
+            return frame
+
+        # -------------------------------
+        # Motion stability mask
+        # -------------------------------
+        # Recalculate mag after clipping/smoothing
+        mag = np.sqrt(flow_cv[..., 0]**2 + flow_cv[..., 1]**2)
+        mask = mag < 20
+
+        result = frame_np.copy()
+        # mask is (H, W), result is (H, W, 3)
+        result[mask] = warped[mask]
+
+        return PILImage.fromarray(result)
