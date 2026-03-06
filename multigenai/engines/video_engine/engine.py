@@ -142,7 +142,7 @@ class VideoEngine:
         # Safety Guard: Falls back if latent dimensions mismatch (e.g. frame count change)
         if previous_latent is not None:
             # SVD-XT latents shape: [batch, frames, channels, height, width]
-            if previous_latent.shape[1] != num_frames:
+            if previous_latent.shape[2] != num_frames:
                 LOG.warning(f"Latent shape mismatch: expected {num_frames} frames, got {previous_latent.shape[1]}. Resetting temporal state.")
                 previous_latent = None
 
