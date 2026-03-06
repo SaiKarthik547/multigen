@@ -42,11 +42,16 @@ class TemporalStableVideoDiffusionPipeline(StableVideoDiffusionPipeline):
         Wraps the call to ensure 5D diffusion latents are captured before VAE decoding.
         
         Args:
-            return_latents: If True, returns a tuple (output, latents).
+            return_latents: If True, forces output_type="latent" and returns (output, latents).
         """
+        if not return_latents:
+            return super().__call__(*args, **kwargs)
+
         # Force output_type to "latent" to get the 5D diffusion tensor
         # [batch, frames, channels, height/8, width/8]
-        output = super().__call__(*args, output_type="latent", **kwargs)
+        temp_kwargs = kwargs.copy()
+        temp_kwargs["output_type"] = "latent"
+        output = super().__call__(*args, **temp_kwargs)
         
         latents = output.frames
         
@@ -54,7 +59,4 @@ class TemporalStableVideoDiffusionPipeline(StableVideoDiffusionPipeline):
         if latents.ndim == 4:
             latents = latents.unsqueeze(1)
             
-        if return_latents:
-            return output, latents
-            
-        return output
+        return output, latents
