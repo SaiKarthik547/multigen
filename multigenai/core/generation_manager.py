@@ -53,7 +53,8 @@ class GenerationManager:
 
     def __init__(self, ctx) -> None:
         self._ctx = ctx
-        self.image_engine = None
+        from multigenai.engines.image_engine.engine import ImageEngine
+        self.image_engine = ImageEngine(ctx)
 
     # ------------------------------------------------------------------
     # Phase 9 helper — build PromptProcessor from context settings
@@ -74,8 +75,7 @@ class GenerationManager:
         For multi-segment plans the first successful segment's result is
         returned; all segments are generated and saved independently.
         """
-        LOG.info("GenerationManager: Booting isolated ImageEngine (SDXL)...")
-        from multigenai.engines.image_engine.engine import ImageEngine
+        LOG.info("GenerationManager: Preparing ImageEngine pipeline (SDXL)...")
         from multigenai.creative.scene_designer import SceneDesigner
         from multigenai.creative.prompt_compiler import PromptCompiler
         from multigenai.core.model_lifecycle import ModelLifecycle
@@ -94,8 +94,6 @@ class GenerationManager:
         results: List["ImageResult"] = []
         seg_dir = self._segmented_dir(plan.run_id) if plan.is_multi_segment else None
         
-        if self.image_engine is None:
-            self.image_engine = ImageEngine(self._ctx)
         engine = self.image_engine
         
         try:
@@ -131,7 +129,6 @@ class GenerationManager:
             self._ctx.behaviour.auto_unload_after_gen = original_unload
             if engine and original_unload:
                 ModelLifecycle.safe_unload(engine)
-                self.image_engine = None
 
         # Return the first successful result (or the last attempt for error info)
         for r in results:
@@ -147,6 +144,7 @@ class GenerationManager:
         self,
         request: "VideoGenerationRequest",
         conditioning_image_path: Optional[str] = None,
+        character_reference_path: Optional[str] = None,
     ) -> "VideoResult":
         """
         Orchestrate SVD-XT video generation with Phase 9 prompt processing.
@@ -161,6 +159,7 @@ class GenerationManager:
         from multigenai.creative.scene_designer import SceneDesigner
         from multigenai.creative.prompt_compiler import PromptCompiler
         from multigenai.core.model_lifecycle import ModelLifecycle
+        from PIL import Image
 
         # --- Phase 9: process prompt ---
         processor = self._build_processor(model_name="svd-xt")
@@ -175,21 +174,22 @@ class GenerationManager:
         # Reset scene memory at the start of a generation plan
         self._ctx.scene_memory.reset()
 
+        if character_reference_path:
+            LOG.info(f"GenerationManager: Loading user character reference from {character_reference_path}")
+            ref = Image.open(character_reference_path).convert("RGB")
+            self._ctx.scene_memory.update(character_reference=ref)
+
         # STEP 1: Generate all conditioning frames
         conditioning_paths = []
         if conditioning_image_path:
             conditioning_paths = [conditioning_image_path] * plan.segment_count
         else:
-            LOG.info("GenerationManager: No initial conditioning image. Booting ImageEngine for all segments...")
-            from multigenai.engines.image_engine.engine import ImageEngine
+            LOG.info("GenerationManager: No initial conditioning image. Preparing ImageEngine for all segments...")
             from multigenai.llm.schema_validator import ImageGenerationRequest
-            from PIL import Image
             
             original_unload = self._ctx.behaviour.auto_unload_after_gen
             self._ctx.behaviour.auto_unload_after_gen = False
             
-            if self.image_engine is None:
-                self.image_engine = ImageEngine(self._ctx)
             image_engine = self.image_engine
             
             try:
@@ -228,8 +228,24 @@ class GenerationManager:
                     
                     # Store images in SceneMemory for successive segment consistency
                     img_obj = Image.open(img_result.path).convert("RGB")
-                    if scene_state.character_reference is None:
-                        self._ctx.scene_memory.update(character_reference=img_obj)
+                    
+                    refs = scene_state.character_reference
+
+                    if refs is None:
+                        # FIRST FRAME IDENTITY CAPTURE
+                        refs = [img_obj]
+                        self._ctx.scene_memory.update(environment_prompt=seg.positive)
+                    else:
+                        if not isinstance(refs, list):
+                            refs = [refs]
+                        
+                        refs = refs.copy()  # CRITICAL
+                        if len(refs) < 3:
+                            refs.append(img_obj)
+                            
+                    self._ctx.scene_memory.update(character_reference=refs)
+
+                    # ALWAYS update spatial reference (ControlNet Depth)
                     self._ctx.scene_memory.update(reference_frame=img_obj)
                         
                     conditioning_paths.append(img_result.path)
@@ -237,7 +253,6 @@ class GenerationManager:
                 self._ctx.behaviour.auto_unload_after_gen = original_unload
                 if image_engine and original_unload:
                     ModelLifecycle.safe_unload(image_engine)
-                    self.image_engine = None
 
         # STEP 2: SVD-XT Keyframes (Load VideoEngine once)
         LOG.info("GenerationManager: Booting isolated VideoEngine (SVD-XT) for all segments...")

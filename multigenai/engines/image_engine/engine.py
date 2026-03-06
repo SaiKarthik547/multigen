@@ -196,7 +196,7 @@ class ImageEngine:
         if use_ip_adapter:
             self.ip_adapter_manager.load(self.pipe)
             if hasattr(self.pipe, "set_ip_adapter_scale"):
-                self.pipe.set_ip_adapter_scale(0.6)
+                self.pipe.set_ip_adapter_scale(0.70)
 
         # --- Apply memory optimizations ---
         if self.device == "cuda":
@@ -260,12 +260,12 @@ class ImageEngine:
             
         if ref_image is not None:
             kwargs["ip_adapter_image"] = ref_image
-
+            
         # --- Normalize IP Adapter input ---
         if "ip_adapter_image" in kwargs:
             ip_img = kwargs["ip_adapter_image"]
-            if isinstance(ip_img, (list, tuple)):
-                ip_img = ip_img[0]
+            if isinstance(ip_img, tuple):
+                ip_img = list(ip_img)
             kwargs["ip_adapter_image"] = ip_img
 
         # --- Normalize ControlNet image ---
@@ -379,7 +379,7 @@ class ImageEngine:
 
             # Drop base before allocating refiner if forced to unload
             if request.use_refiner:
-                if self._ctx.behaviour.auto_unload_after_gen:
+                if self._ctx.behaviour.auto_unload_after_gen and self.pipe is not None:
                     ModelLifecycle.safe_unload(self.pipe)
                     self.pipe = None
                 image = self._refine(image, compiled_prompt, negative_prompt, request, generator)
