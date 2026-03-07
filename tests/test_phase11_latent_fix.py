@@ -19,6 +19,8 @@ def engine(tmp_path):
 def test_latent_propagation_shape_guard(engine):
     # Mock pipe to avoid loading the model
     engine.pipe = MagicMock()
+    engine.pipe.unet = MagicMock()
+    engine.pipe.unet.dtype = torch.float32
     
     request = VideoGenerationRequest(
         prompt="test prompt",
@@ -31,6 +33,8 @@ def test_latent_propagation_shape_guard(engine):
     wrong_latent = torch.randn(1, 25, 4, 64, 64)
     
     with patch.object(engine, 'pipe') as mock_pipe:
+        mock_pipe.unet = MagicMock()
+        mock_pipe.unet.dtype = torch.float32
         # Mocking the single-pass behavior:
         # returns (output, latents)
         mock_output = MagicMock()
@@ -51,6 +55,8 @@ def test_latent_propagation_shape_guard(engine):
 
 def test_latent_propagation_real_injection(engine):
     engine.pipe = MagicMock()
+    engine.pipe.unet = MagicMock()
+    engine.pipe.unet.dtype = torch.float32
     
     request = VideoGenerationRequest(
         prompt="test prompt",
@@ -63,6 +69,8 @@ def test_latent_propagation_real_injection(engine):
     correct_latent = torch.randn(1, 14, 4, 64, 64)
     
     with patch.object(engine, 'pipe') as mock_pipe:
+        mock_pipe.unet = MagicMock()
+        mock_pipe.unet.dtype = torch.float32
         mock_output = MagicMock()
         mock_output.frames = [[Image.new("RGB", (512, 512))]]
         mock_latents = torch.randn(1, 14, 4, 64, 64)

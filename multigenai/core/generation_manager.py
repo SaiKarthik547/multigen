@@ -311,8 +311,8 @@ class GenerationManager:
                 # Phase 11: Update Temporal State
                 if frames:
                     temporal_state.previous_frame = frames[-1]
-                    # CRITICAL: detach and move to CPU to avoid VRAM leakage across scenes
-                    temporal_state.previous_latent = final_latent.detach().cpu() if final_latent is not None else None
+                    # detachment and cloning to ensure zero-overlap between segments
+                    temporal_state.previous_latent = final_latent.detach().cpu().clone() if final_latent is not None else None
                     temporal_state.scene_index += 1
                     
                     # Push the last generated keyframe into SceneMemory to serve as the 

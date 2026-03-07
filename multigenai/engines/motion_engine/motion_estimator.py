@@ -97,7 +97,7 @@ class MotionEstimator:
         
         LOG.debug(f"MotionEstimator: flow magnitude mean={flow_mag:.2f}")
 
-        if flow_mag > 30:
+        if flow_mag > 60:
             # large camera jump or scene cut
             LOG.info("MotionEstimator: Large scene change detected — skipping warp")
             return frame
@@ -110,7 +110,7 @@ class MotionEstimator:
         # -------------------------------
         # Smooth the flow field
         # -------------------------------
-        flow_cv = cv2.GaussianBlur(flow_cv, (7, 7), 0)
+        flow_cv = cv2.GaussianBlur(flow_cv, (5, 5), 0)
 
         # -------------------------------
         # Generate sampling grid

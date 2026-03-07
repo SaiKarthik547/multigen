@@ -23,7 +23,7 @@ class TemporalStableVideoDiffusionPipeline(StableVideoDiffusionPipeline):
         Overrides the default latent preparation to respect the 'latents' argument.
         """
         if latents is not None:
-            return latents.to(device=device, dtype=dtype)
+            return latents.to(device=device, dtype=dtype).clone()
 
         return super().prepare_latents(
             batch_size,
@@ -99,7 +99,6 @@ class TemporalStableVideoDiffusionPipeline(StableVideoDiffusionPipeline):
                 decoded_chunk = decoded_chunk.reshape(b, f, *decoded_chunk.shape[1:])
                 decoded_chunks.append(decoded_chunk.cpu())
                 del decoded_chunk
-                torch.cuda.empty_cache()
                 
             # Combine all chunks: [batch, frames, channels, H, W]
             decoded = torch.cat(decoded_chunks, dim=1)

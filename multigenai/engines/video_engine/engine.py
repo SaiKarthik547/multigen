@@ -110,9 +110,14 @@ class VideoEngine:
         except Exception as exc:
             LOG.warning(f"Error flushing CUDA memory: {exc}")
 
-    def renoise_latent(self, prev_latent, strength=0.25):
-        noise = torch.randn_like(prev_latent, device=prev_latent.device)
-        return (1 - strength) * prev_latent + strength * noise
+    def renoise_latent(self, prev_latent: torch.Tensor, strength: float = 0.03) -> torch.Tensor:
+        """
+        Inject minimal Gaussian noise into an existing latent tensor while preserving structure.
+
+        This maintains temporal continuity without degrading spatial detail.
+        """
+        noise = torch.randn_like(prev_latent, generator=torch.Generator().manual_seed(0))
+        return prev_latent + noise * strength
 
     def _generate_video(
         self,
@@ -164,12 +169,15 @@ class VideoEngine:
 
         latents = None
         if previous_latent is not None:
-            # CRITICAL: ensure latent is on the correct device before injection
-            previous_latent = previous_latent.to(self.device)
-            # Optional: Clamp latent magnitude to prevent exploding distributions
-            previous_latent = previous_latent.clamp(-4.0, 4.0)
+            # CRITICAL: ensure latent is on the correct device and dtype before injection
+            # Fix 3: Preserve precision by matching UNet dtype
+            previous_latent = previous_latent.to(
+                device=self.device,
+                dtype=self.pipe.unet.dtype
+            )
             
-            latents = self.renoise_latent(previous_latent, strength=0.25)
+            # Fix 2: Remove clamping to preserve texture detail
+            latents = self.renoise_latent(previous_latent, strength=0.03)
             LOG.info(f"Temporal latent tensor input shape: {latents.shape} (device={latents.device})")
 
         # Unified single-pass: Generate both frames and propagate-friendly latents
