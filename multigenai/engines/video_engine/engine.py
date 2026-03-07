@@ -15,6 +15,7 @@ import gc
 import os
 import pathlib
 import subprocess
+import torch
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
@@ -144,8 +145,8 @@ class VideoEngine:
             if previous_latent.ndim != 5:
                 LOG.warning(f"Invalid latent rank: expected 5D, got {previous_latent.ndim}D. Resetting temporal state.")
                 previous_latent = None
-            elif previous_latent.shape[1] != num_frames:
-                LOG.warning(f"Latent shape mismatch: expected {num_frames} frames, got {previous_latent.shape[1]}. Resetting temporal state.")
+            elif abs(previous_latent.shape[1] - num_frames) > 1:
+                LOG.warning(f"Latent frame mismatch: expected {num_frames} frames, got {previous_latent.shape[1]}. Resetting temporal state.")
                 previous_latent = None
             else:
                 # Spatial dimension guard: ensure height/width match (H/8, W/8)
@@ -158,7 +159,9 @@ class VideoEngine:
                     previous_latent = None
 
         if previous_latent is not None:
-            LOG.info(f"Temporal latent tensor input shape: {previous_latent.shape}")
+            # CRITICAL: ensure latent is on the correct device before injection
+            previous_latent = previous_latent.to(self.device)
+            LOG.info(f"Temporal latent tensor input shape: {previous_latent.shape} (device={previous_latent.device})")
 
         # Unified single-pass: Generate both frames and propagate-friendly latents
         # We use return_latents=True to get the 5D diffusion tensor directly from the pass
@@ -241,6 +244,9 @@ class VideoEngine:
         try:
             # Stream frames one-by-one: no peak allocation of frames × W × H × 3 bytes
             for frame in frames:
+                # Broken pipe guard
+                if process.poll() is not None:
+                   raise RuntimeError("ffmpeg process terminated early during stream write.")
                 process.stdin.write(np.asarray(frame, dtype=np.uint8).tobytes())
 
             process.stdin.close()         # EOF signal — ffmpeg begins muxing

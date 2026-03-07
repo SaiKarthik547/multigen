@@ -32,6 +32,10 @@ class MotionEstimator:
         img1 = TF.to_tensor(frame_a).unsqueeze(0).to(self.device)
         img2 = TF.to_tensor(frame_b).unsqueeze(0).to(self.device)
         
+        # RAFT guard: ensure RGB input
+        if img1.shape[1] != 3:
+            raise ValueError(f"MotionEstimator: RAFT expects RGB input (3 channels), got {img1.shape[1]}")
+        
         # RAFT expects inputs to be multiples of 8
         h, w = img1.shape[-2:]
         new_h = (h // 8) * 8
@@ -130,7 +134,8 @@ class MotionEstimator:
         mask = mag < 20
 
         result = frame_np.copy()
-        # mask is (H, W), result is (H, W, 3)
-        result[mask] = warped[mask]
+        # mag is (H, W), result is (H, W, 3). Broadcast mask to all channels.
+        mask = mask[..., None]
+        result[np.repeat(mask, 3, axis=-1)] = warped[np.repeat(mask, 3, axis=-1)]
 
         return PILImage.fromarray(result)

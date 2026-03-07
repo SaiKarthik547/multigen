@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import gc
 import pathlib
+import copy
 from typing import TYPE_CHECKING, List, Optional
 
 from multigenai.core.logging.logger import get_logger
@@ -292,9 +293,10 @@ class GenerationManager:
                     flow = motion_estimator.estimate(temporal_state.previous_frame, init_image)
                     if flow is not None:
                         warped_c = motion_estimator.warp_frame(temporal_state.previous_frame, flow)
-                        # Save warped conditioning image to a temporary file
-                        c_path = str(pathlib.Path(c_path).with_name(f"warped_{pathlib.Path(c_path).name}"))
-                        warped_c.save(c_path)
+                        # Save warped conditioning image to a separate file to avoid overwriting original
+                        warp_path = str(pathlib.Path(c_path).with_name(f"warp_{pathlib.Path(c_path).name}"))
+                        warped_c.save(warp_path)
+                        c_path = warp_path
                 
                 frames, final_latent, out_path, seed = video_engine.generate_frames(
                     seg_request, 
@@ -306,14 +308,16 @@ class GenerationManager:
                 # Phase 11: Update Temporal State
                 if frames:
                     temporal_state.previous_frame = frames[-1]
-                    temporal_state.previous_latent = final_latent
+                    # CRITICAL: detach and move to CPU to avoid VRAM leakage across scenes
+                    temporal_state.previous_latent = final_latent.detach().cpu() if final_latent is not None else None
                     temporal_state.scene_index += 1
                     
                     # Push the last generated keyframe into SceneMemory to serve as the 
                     # semantic & structural 'reference_frame' for the next generated segment
+                    # Use deepcopy to prevent pointer mutation issues across segments
                     self._ctx.scene_memory.update(
                         reference_frame=frames[-1],
-                        temporal_state=temporal_state
+                        temporal_state=copy.deepcopy(temporal_state)
                     )
         except Exception as exc:
             LOG.error(f"GenerationManager: VideoEngine failed: {exc}", exc_info=True)
@@ -322,6 +326,17 @@ class GenerationManager:
             self._ctx.behaviour.auto_unload_after_gen = original_unload
             if video_engine and original_unload:
                 ModelLifecycle.safe_unload(video_engine)
+            
+            # CRITICAL: unload RAFT after video generation loop to reclaim VRAM
+            if motion_estimator:
+                LOG.info("GenerationManager: Unloading MotionEstimator to free RAFT VRAM...")
+                del motion_estimator
+            
+            import gc
+            import torch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         # STEP 3 & 4: Interpolation and mp4 Encoding
         results: List["VideoResult"] = []
