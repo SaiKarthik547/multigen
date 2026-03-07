@@ -24,6 +24,14 @@ class MotionEstimator:
             LOG.error(f"MotionEstimator: Failed to load RAFT model: {e}")
             self.model = None
 
+    def unload(self):
+        """Reclaim RAFT model VRAM."""
+        if hasattr(self, "model") and self.model is not None:
+            from multigenai.core.model_lifecycle import ModelLifecycle
+            ModelLifecycle.safe_unload(self.model)
+            self.model = None
+            LOG.info("MotionEstimator: RAFT model unloaded.")
+
     def estimate(self, frame_a: PILImage.Image, frame_b: PILImage.Image) -> Optional[np.ndarray]:
         """Estimate optical flow between two frames using RAFT large."""
         if self.model is None:

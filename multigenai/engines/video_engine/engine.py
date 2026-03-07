@@ -110,6 +110,10 @@ class VideoEngine:
         except Exception as exc:
             LOG.warning(f"Error flushing CUDA memory: {exc}")
 
+    def renoise_latent(self, prev_latent, strength=0.25):
+        noise = torch.randn_like(prev_latent, device=prev_latent.device)
+        return (1 - strength) * prev_latent + strength * noise
+
     def _generate_video(
         self,
         request: "VideoGenerationRequest",
@@ -158,13 +162,19 @@ class VideoEngine:
                     )
                     previous_latent = None
 
+        latents = None
         if previous_latent is not None:
             # CRITICAL: ensure latent is on the correct device before injection
             previous_latent = previous_latent.to(self.device)
-            LOG.info(f"Temporal latent tensor input shape: {previous_latent.shape} (device={previous_latent.device})")
+            # Optional: Clamp latent magnitude to prevent exploding distributions
+            previous_latent = previous_latent.clamp(-4.0, 4.0)
+            
+            latents = self.renoise_latent(previous_latent, strength=0.25)
+            LOG.info(f"Temporal latent tensor input shape: {latents.shape} (device={latents.device})")
 
         # Unified single-pass: Generate both frames and propagate-friendly latents
         # We use return_latents=True to get the 5D diffusion tensor directly from the pass
+
         result, final_latent = self.pipe(
             image=conditioning_image,
             num_frames=num_frames,
@@ -175,7 +185,7 @@ class VideoEngine:
             motion_bucket_id=motion_bucket,
             decode_chunk_size=2,
             output_type="pil",
-            latents=previous_latent,
+            latents=latents,
             return_latents=True,
             return_dict=True
         )
@@ -189,6 +199,7 @@ class VideoEngine:
         
         return frames, final_latent
 
+    
         
 
     def _encode_video(self, frames: List["PILImage"], path: str, fps: int) -> None:

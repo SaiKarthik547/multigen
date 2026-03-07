@@ -267,7 +267,9 @@ class GenerationManager:
         original_unload = self._ctx.behaviour.auto_unload_after_gen
         self._ctx.behaviour.auto_unload_after_gen = False
         video_engine = None
-        motion_estimator = MotionEstimator(device=self._ctx.device)
+        self.motion_estimator = MotionEstimator(device=self._ctx.device)
+        motion_estimator = self.motion_estimator
+
         
         # Phase 11: Temporal State Tracking
         temporal_state = TemporalState()
@@ -289,7 +291,8 @@ class GenerationManager:
                 # Phase 11: Motion-guided warping
                 if temporal_state.previous_frame is not None:
                     LOG.info(f"GenerationManager: Estimating motion for scene continuity...")
-                    init_image = Image.open(c_path).convert("RGB")
+                    with Image.open(c_path) as img:
+                        init_image = img.convert("RGB")
                     flow = motion_estimator.estimate(temporal_state.previous_frame, init_image)
                     if flow is not None:
                         warped_c = motion_estimator.warp_frame(temporal_state.previous_frame, flow)
@@ -324,13 +327,18 @@ class GenerationManager:
             return self._video_fail(request, str(exc))
         finally:
             self._ctx.behaviour.auto_unload_after_gen = original_unload
-            if video_engine and original_unload:
-                ModelLifecycle.safe_unload(video_engine)
+            if video_engine:
+                if original_unload:
+                    LOG.info("GenerationManager: auto-unloading VideoEngine...")
+                    ModelLifecycle.safe_unload(video_engine)
+                # Explicit nullification to assist GC
+                video_engine = None
             
             # CRITICAL: unload RAFT after video generation loop to reclaim VRAM
-            if motion_estimator:
+            if hasattr(self, "motion_estimator") and self.motion_estimator:
                 LOG.info("GenerationManager: Unloading MotionEstimator to free RAFT VRAM...")
-                del motion_estimator
+                self.motion_estimator.unload()
+                self.motion_estimator = None
             
             import gc
             import torch

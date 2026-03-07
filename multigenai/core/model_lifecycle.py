@@ -30,6 +30,10 @@ class ModelLifecycle:
         """
         Safely destroy a model object and aggressively reclaim GPU/host memory.
 
+        IMPORTANT: This function removes the local reference but the caller MUST 
+        nullify their own reference (e.g., `model = None`) after calling this 
+        to ensure Python's GC can reclaim the memory.
+
         Safe to call with None (no-op).
         Safe to call multiple times on the same object (idempotent via None check).
         Logs CUDA stats when DEBUG level is active.
@@ -55,7 +59,9 @@ class ModelLifecycle:
             if torch.cuda.is_available():
                 before_mb = torch.cuda.memory_reserved() / 1024 / 1024
                 torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
+                # Guard IPC collect for CUDA-only environments to prevent runtime errors on CPU
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
                 after_mb = torch.cuda.memory_reserved() / 1024 / 1024
                 LOG.debug(
                     f"ModelLifecycle: VRAM reclaimed from {obj_name} — "

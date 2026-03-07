@@ -70,13 +70,16 @@ class TemporalStableVideoDiffusionPipeline(StableVideoDiffusionPipeline):
             # Decode frames manually to save a second diffusion pass
             batch, frames, channels, h, w = latents.shape
             
+            # Ensure it's 5D (batch, frames, channels, h, w) for manual decoding
+            assert latents.ndim == 5, f"Manual decode expects 5D latents, got {latents.ndim}D"
+            
             # scaling_factor is usually 0.18215 for SD/SVD
             scaling_factor = getattr(self.vae.config, "scaling_factor", 0.18215)
             
             # Chunking decode to save VRAM (research-correct solution)
             # This reduces peak memory spikes by ~4x
             chunk_size = 6
-            decoded_frames = []
+            decoded_chunks = []
             
             for i in range(0, frames, chunk_size):
                 # Slice the latents for this chunk: [batch, frames_in_chunk, channels, h, w]
@@ -86,7 +89,7 @@ class TemporalStableVideoDiffusionPipeline(StableVideoDiffusionPipeline):
                 # Reshape for VAE: [batch * frames_in_chunk, channels, h, w]
                 latent_chunk_reshaped = latent_chunk.reshape(b * f, c, h_lat, w_lat)
                 
-                # Part 1: VAE decode
+                # Part 1: VAE decode (No manual normalization here; processor handles it)
                 decoded_chunk = self.vae.decode(
                     latent_chunk_reshaped / scaling_factor,
                     num_frames=f
@@ -94,18 +97,27 @@ class TemporalStableVideoDiffusionPipeline(StableVideoDiffusionPipeline):
                 
                 # Part 2: Reshape back to (batch, frames_in_chunk, channels, H, W)
                 decoded_chunk = decoded_chunk.reshape(b, f, *decoded_chunk.shape[1:])
-                decoded_frames.append(decoded_chunk.cpu())
+                decoded_chunks.append(decoded_chunk.cpu())
                 del decoded_chunk
                 torch.cuda.empty_cache()
                 
-            # Combine all chunks
-            decoded = torch.cat(decoded_frames, dim=1)
-            decoded = decoded.clamp(-1, 1)
-            decoded = (decoded + 1) / 2
-            decoded = decoded.cpu()
+            # Combine all chunks: [batch, frames, channels, H, W]
+            decoded = torch.cat(decoded_chunks, dim=1)
+            
+            # CRITICAL FIX: video_processor.postprocess() expects 4D tensor [N, C, H, W]
+            # where N = batch * frames.
+            b, f, c_img, h_img, w_img = decoded.shape
+            decoded_reshaped = decoded.reshape(b * f, c_img, h_img, w_img)
             
             # Post-process to PIL images
-            images = self.video_processor.postprocess(decoded, output_type="pil")
-            output.frames = images
+            images = self.video_processor.postprocess(decoded_reshaped, output_type="pil")
+            
+            # Reconstruct batch structure: List[List[PIL.Image]]
+            # Diffusers SVD pipelines return a list of lists of images.
+            batch_frames = []
+            for i in range(b):
+                batch_frames.append(images[i * f : (i + 1) * f])
+            
+            output.frames = batch_frames
 
         return output, latents
