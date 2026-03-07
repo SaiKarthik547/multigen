@@ -42,8 +42,8 @@ class MotionEstimator:
             img2 = F.interpolate(img2, size=(new_h, new_w), mode='bilinear', align_corners=False)
 
         # RAFT expects images normalized to [-1, 1]
-        img1 = (img1 * 2) - 1
-        img2 = (img2 * 2) - 1
+        img1 = (img1 - 0.5) / 0.5
+        img2 = (img2 - 0.5) / 0.5
         
         with torch.no_grad():
             list_of_flows = self.model(img1, img2)

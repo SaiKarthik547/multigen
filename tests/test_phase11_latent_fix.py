@@ -31,27 +31,23 @@ def test_latent_propagation_shape_guard(engine):
     wrong_latent = torch.randn(1, 25, 4, 64, 64)
     
     with patch.object(engine, 'pipe') as mock_pipe:
-        # Mocking the two-pass behavior:
-        # 1st pass (return_latents=False) -> returns output
-        # 2nd pass (return_latents=True) -> returns (output, latents)
+        # Mocking the single-pass behavior:
+        # returns (output, latents)
         mock_output = MagicMock()
         mock_output.frames = [[Image.new("RGB", (512, 512))]]
         mock_latents = torch.randn(1, 14, 4, 64, 64)
         
-        def pipe_side_effect(*args, **kwargs):
-            if kwargs.get('return_latents', False):
-                return mock_output, mock_latents
-            return mock_output
-            
-        mock_pipe.side_effect = pipe_side_effect
+        mock_pipe.return_value = (mock_output, mock_latents)
         
-        # This will call the pipe twice in _generate_video
+        # This will call the pipe once in _generate_video
         engine._generate_video(request, Image.new("RGB", (512, 512)), seed=42, num_frames=14, previous_latent=wrong_latent)
         
-        # Inspect first call's kwargs
-        first_call_kwargs = mock_pipe.call_args_list[0].kwargs
-        assert first_call_kwargs['latents'] is None
-        assert first_call_kwargs['num_frames'] == 14
+        # Inspect call's kwargs
+        call_kwargs = mock_pipe.call_args.kwargs
+        # Shape guard should have caught the mismatch and passed None to pipe
+        assert call_kwargs['latents'] is None
+        assert call_kwargs['num_frames'] == 14
+        assert call_kwargs['return_latents'] is True
 
 def test_latent_propagation_real_injection(engine):
     engine.pipe = MagicMock()
@@ -71,16 +67,13 @@ def test_latent_propagation_real_injection(engine):
         mock_output.frames = [[Image.new("RGB", (512, 512))]]
         mock_latents = torch.randn(1, 14, 4, 64, 64)
         
-        def pipe_side_effect(*args, **kwargs):
-            if kwargs.get('return_latents', False):
-                return mock_output, mock_latents
-            return mock_output
-            
-        mock_pipe.side_effect = pipe_side_effect
+        mock_pipe.return_value = (mock_output, mock_latents)
         
         engine._generate_video(request, Image.new("RGB", (512, 512)), seed=42, num_frames=14, previous_latent=correct_latent)
         
-        # Inspect first call's kwargs
-        first_call_kwargs = mock_pipe.call_args_list[0].kwargs
-        assert first_call_kwargs['latents'] is not None
-        assert torch.equal(first_call_kwargs['latents'], correct_latent)
+        # Inspect call's kwargs
+        call_kwargs = mock_pipe.call_args.kwargs
+        # Should have passed the correct latent
+        assert call_kwargs['latents'] is not None
+        assert torch.equal(call_kwargs['latents'], correct_latent)
+        assert call_kwargs['return_latents'] is True

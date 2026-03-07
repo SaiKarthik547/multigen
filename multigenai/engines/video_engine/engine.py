@@ -126,15 +126,14 @@ class VideoEngine:
         """
         import torch
 
-        # CPU generators: separate RNG streams to prevent noise correlation between passes
-        frame_generator = torch.Generator(device="cpu").manual_seed(seed)
-        latent_generator = torch.Generator(device="cpu").manual_seed(seed + 1)
+        # CPU generators: single RNG stream for the unified pass
+        generator = torch.Generator(device="cpu").manual_seed(seed)
         
         # Map temporal_strength (0.0–1.0) to native SVD motion_bucket_id (0–255)
         motion_bucket = max(0, min(255, int(request.temporal_strength * 255)))
         
         LOG.info(
-            f"Phase 11: Generating {num_frames} frames via SVD-XT with REAL latent propagation. "
+            f"Phase 11: Generating {num_frames} frames via SVD-XT (Single-Pass Optimization). "
             f"Seed={seed}, resolution={request.width}x{request.height}, "
             f"steps={request.num_inference_steps}, motion_bucket_id={motion_bucket}."
         )
@@ -148,45 +147,41 @@ class VideoEngine:
             elif previous_latent.shape[1] != num_frames:
                 LOG.warning(f"Latent shape mismatch: expected {num_frames} frames, got {previous_latent.shape[1]}. Resetting temporal state.")
                 previous_latent = None
+            else:
+                # Spatial dimension guard: ensure height/width match (H/8, W/8)
+                expected_h, expected_w = request.height // 8, request.width // 8
+                if previous_latent.shape[-2:] != (expected_h, expected_w):
+                    LOG.warning(
+                        f"Latent spatial mismatch: expected {(expected_h, expected_w)}, "
+                        f"got {previous_latent.shape[-2:]}. Resetting temporal state."
+                    )
+                    previous_latent = None
 
         if previous_latent is not None:
-            LOG.info(f"Temporal latent tensor shape: {previous_latent.shape}")
+            LOG.info(f"Temporal latent tensor input shape: {previous_latent.shape}")
 
-        # First pass: Generate the frames
-        # Uses frame_generator (original seed)
-        output = self.pipe(
+        # Unified single-pass: Generate both frames and propagate-friendly latents
+        # We use return_latents=True to get the 5D diffusion tensor directly from the pass
+        result, final_latent = self.pipe(
             image=conditioning_image,
             num_frames=num_frames,
             num_inference_steps=request.num_inference_steps,
             height=request.height,
             width=request.width,
-            generator=frame_generator,
+            generator=generator,
             motion_bucket_id=motion_bucket,
             decode_chunk_size=2,
             output_type="pil",
-            latents=previous_latent,
-            return_dict=True
-        )
-        
-        frames = output.frames[0]
-
-        # Second pass: Capture final diffusion latents for propagation
-        # Uses latent_generator (seed + 1) to prevent noise correlation
-        # We use return_latents=True to get the 5D diffusion tensor
-        _, final_latent = self.pipe(
-            image=conditioning_image,
-            num_frames=num_frames,
-            num_inference_steps=request.num_inference_steps,
-            height=request.height,
-            width=request.width,
-            generator=latent_generator,
-            motion_bucket_id=motion_bucket,
-            decode_chunk_size=2,
             latents=previous_latent,
             return_latents=True,
             return_dict=True
         )
         
+        frames = result.frames[0]
+        
+        if final_latent is not None:
+            LOG.info(f"Temporal latent tensor output captured. Shape: {final_latent.shape}")
+
         return frames, final_latent
 
     def _encode_video(self, frames: List["PILImage"], path: str, fps: int) -> None:
