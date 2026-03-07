@@ -322,6 +322,12 @@ class GenerationManager:
                         reference_frame=frames[-1],
                         temporal_state=copy.deepcopy(temporal_state)
                     )
+
+                # Segment-level VRAM hardening: Clear cache after each segment
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    if hasattr(torch.cuda, "ipc_collect"):
+                        torch.cuda.ipc_collect()
         except Exception as exc:
             LOG.error(f"GenerationManager: VideoEngine failed: {exc}", exc_info=True)
             return self._video_fail(request, str(exc))

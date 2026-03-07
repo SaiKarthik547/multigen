@@ -78,7 +78,7 @@ class TemporalStableVideoDiffusionPipeline(StableVideoDiffusionPipeline):
             
             # Chunking decode to save VRAM (research-correct solution)
             # This reduces peak memory spikes by ~4x
-            chunk_size = 6
+            chunk_size = 4
             decoded_chunks = []
             
             for i in range(0, frames, chunk_size):
