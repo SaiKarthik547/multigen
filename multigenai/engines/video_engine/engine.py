@@ -182,7 +182,11 @@ class VideoEngine:
         if final_latent is not None:
             LOG.info(f"Temporal latent tensor output captured. Shape: {final_latent.shape}")
 
+        LOG.info(f"Generated frames: {len(frames)}")
+        
         return frames, final_latent
+
+        
 
     def _encode_video(self, frames: List["PILImage"], path: str, fps: int) -> None:
         """

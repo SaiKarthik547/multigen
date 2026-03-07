@@ -247,6 +247,19 @@ class GenerationManager:
                     ModelLifecycle.safe_unload(image_engine)
 
         # STEP 2: SVD-XT Keyframes (Load VideoEngine once)
+        # CRITICAL: Unload image pipeline before video generation to free (6-8 GB) VRAM
+        if self.image_engine:
+            LOG.info("GenerationManager: Unloading image engine to free VRAM for video...")
+            ModelLifecycle.safe_unload(self.image_engine)
+            del self.image_engine
+            self.image_engine = None
+
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         LOG.info("GenerationManager: Booting isolated VideoEngine (SVD-XT) for all segments...")
         from multigenai.engines.video_engine.engine import VideoEngine
         
