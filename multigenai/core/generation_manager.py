@@ -261,15 +261,13 @@ class GenerationManager:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        LOG.info("GenerationManager: Booting isolated VideoEngine (SVD-XT) for all segments...")
+        LOG.info("GenerationManager: Booting isolated VideoEngine (SVD-XT) per scene...")
         from multigenai.engines.video_engine.engine import VideoEngine
         
         original_unload = self._ctx.behaviour.auto_unload_after_gen
         self._ctx.behaviour.auto_unload_after_gen = False
-        video_engine = None
-        self.motion_estimator = MotionEstimator(device=self._ctx.device)
-        motion_estimator = self.motion_estimator
-
+        
+        self.motion_estimator = None
         
         # Phase 11: Temporal State Tracking
         temporal_state = TemporalState()
@@ -277,8 +275,10 @@ class GenerationManager:
         # Tuple of (segment, frames, out_path, seed)
         seg_frames = []
         try:
-            video_engine = VideoEngine(self._ctx)
             for seg, c_path in zip(plan.segments, conditioning_paths):
+                # FRESH BOOT per scene to prevent cumulative VRAM fragmentation
+                video_engine = VideoEngine(self._ctx)
+                
                 scene_state = self._ctx.scene_memory.get()
                 
                 # Enrich segment prompt with remembered environment
@@ -288,20 +288,25 @@ class GenerationManager:
                     
                 seg_request = request.model_copy(update={"prompt": seg_prompt})
                 
-                # Phase 11: Motion-guided warping
+                # Phase 11: Motion-guided warping (Lazy Load RAFT only if continuity exists)
                 if temporal_state.previous_frame is not None:
+                    if self.motion_estimator is None:
+                        LOG.info("GenerationManager: Booting RAFT (MotionEstimator) for temporal continuity...")
+                        self.motion_estimator = MotionEstimator(device=self._ctx.device)
+
                     LOG.info(f"GenerationManager: Estimating motion for scene continuity...")
                     with Image.open(c_path) as img:
                         init_image = img.convert("RGB")
-                    flow = motion_estimator.estimate(temporal_state.previous_frame, init_image)
+                    flow = self.motion_estimator.estimate(temporal_state.previous_frame, init_image)
                     if flow is not None:
-                        warped_c = motion_estimator.warp_frame(temporal_state.previous_frame, flow)
-                        # Save warped conditioning image to a separate file to avoid overwriting original
+                        warped_c = self.motion_estimator.warp_frame(temporal_state.previous_frame, flow)
+                        # Save warped conditioning image
                         warp_path = str(pathlib.Path(c_path).with_name(f"warp_{pathlib.Path(c_path).name}"))
                         warped_c.save(warp_path)
                         c_path = warp_path
                 
-                frames, final_latent, out_path, seed = video_engine.generate_frames(
+                # generate_frames now returns already-truncated latent anchors [B, 1, C, H, W]
+                frames, final_latent_anchor, out_path, seed = video_engine.generate_frames(
                     seg_request, 
                     c_path,
                     previous_latent=temporal_state.previous_latent
@@ -311,8 +316,8 @@ class GenerationManager:
                 # Phase 11: Update Temporal State
                 if frames:
                     temporal_state.previous_frame = frames[-1]
-                    # detachment and cloning to ensure zero-overlap between segments
-                    temporal_state.previous_latent = final_latent.detach().cpu().clone() if final_latent is not None else None
+                    # FIX 10: Store already-truncated anchor
+                    temporal_state.previous_latent = final_latent_anchor
                     temporal_state.scene_index += 1
                     
                     # Push the last generated keyframe into SceneMemory to serve as the 
@@ -323,31 +328,22 @@ class GenerationManager:
                         temporal_state=copy.deepcopy(temporal_state)
                     )
 
-                # Segment-level VRAM hardening: Clear cache after each segment
+                # Segment-level VRAM hardening: Destroy engine and clear cache
+                del video_engine
+                import gc
+                gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                    if hasattr(torch.cuda, "ipc_collect"):
-                        torch.cuda.ipc_collect()
+                    torch.cuda.ipc_collect()
         except Exception as exc:
-            LOG.error(f"GenerationManager: VideoEngine failed: {exc}", exc_info=True)
+            LOG.error(f"GenerationManager: Video generation failed: {exc}", exc_info=True)
             return self._video_fail(request, str(exc))
         finally:
             self._ctx.behaviour.auto_unload_after_gen = original_unload
-            if video_engine:
-                if original_unload:
-                    LOG.info("GenerationManager: auto-unloading VideoEngine...")
-                    ModelLifecycle.safe_unload(video_engine)
-                # Explicit nullification to assist GC
-                video_engine = None
-            
-            # CRITICAL: unload RAFT after video generation loop to reclaim VRAM
-            if hasattr(self, "motion_estimator") and self.motion_estimator:
-                LOG.info("GenerationManager: Unloading MotionEstimator to free RAFT VRAM...")
+            if self.motion_estimator:
                 self.motion_estimator.unload()
-                self.motion_estimator = None
             
             import gc
-            import torch
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()

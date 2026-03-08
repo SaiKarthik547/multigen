@@ -81,10 +81,10 @@ class VideoEngine:
             LOG.error(f"Failed to load SVD pipeline: {e}")
             raise
 
-        # Memory optimizations:
-        #   sequential_cpu_offload: UNet/VAE/image_encoder move to GPU only when used
         if self.device == "cuda":
-            self.pipe.enable_sequential_cpu_offload()
+            self.pipe.enable_model_cpu_offload()
+            self.pipe.enable_vae_slicing()
+            self.pipe.enable_attention_slicing()
         else:
             self.pipe = self.pipe.to(self.device)
 
@@ -116,7 +116,7 @@ class VideoEngine:
 
         This maintains temporal continuity without degrading spatial detail.
         """
-        noise = torch.randn_like(prev_latent, generator=torch.Generator().manual_seed(0))
+        noise = torch.randn_like(prev_latent)
         return prev_latent + noise * strength
 
     def _generate_video(
@@ -154,9 +154,6 @@ class VideoEngine:
             if previous_latent.ndim != 5:
                 LOG.warning(f"Invalid latent rank: expected 5D, got {previous_latent.ndim}D. Resetting temporal state.")
                 previous_latent = None
-            elif abs(previous_latent.shape[1] - num_frames) > 1:
-                LOG.warning(f"Latent frame mismatch: expected {num_frames} frames, got {previous_latent.shape[1]}. Resetting temporal state.")
-                previous_latent = None
             else:
                 # Spatial dimension guard: ensure height/width match (H/8, W/8)
                 expected_h, expected_w = request.height // 8, request.width // 8
@@ -165,6 +162,14 @@ class VideoEngine:
                         f"Latent spatial mismatch: expected {(expected_h, expected_w)}, "
                         f"got {previous_latent.shape[-2:]}. Resetting temporal state."
                     )
+                    previous_latent = None
+                
+                # FIX 10: Handle single-frame anchor from previous scene
+                if previous_latent is not None and previous_latent.shape[1] == 1:
+                    LOG.debug(f"VideoEngine: Expanding single-frame latent anchor to {num_frames} frames.")
+                    previous_latent = previous_latent.repeat(1, num_frames, 1, 1, 1)
+                elif previous_latent is not None and previous_latent.shape[1] != num_frames:
+                    LOG.warning(f"Latent frame mismatch: expected {num_frames} or 1, got {previous_latent.shape[1]}. Resetting.")
                     previous_latent = None
 
         latents = None
@@ -182,30 +187,45 @@ class VideoEngine:
 
         # Unified single-pass: Generate both frames and propagate-friendly latents
         # We use return_latents=True to get the 5D diffusion tensor directly from the pass
-
-        result, final_latent = self.pipe(
-            image=conditioning_image,
-            num_frames=num_frames,
-            num_inference_steps=request.num_inference_steps,
-            height=request.height,
-            width=request.width,
-            generator=generator,
-            motion_bucket_id=motion_bucket,
-            decode_chunk_size=2,
-            output_type="pil",
-            latents=latents,
-            return_latents=True,
-            return_dict=True
-        )
+        with torch.inference_mode():
+            result, final_latent = self.pipe(
+                image=conditioning_image,
+                num_frames=num_frames,
+                num_inference_steps=request.num_inference_steps,
+                height=request.height,
+                width=request.width,
+                generator=generator,
+                motion_bucket_id=motion_bucket,
+                decode_chunk_size=8,
+                output_type="pil",
+                latents=latents,
+                return_latents=True,
+                return_dict=True
+            )
         
         frames = result.frames[0]
         
-        if final_latent is not None:
-            LOG.info(f"Temporal latent tensor output captured. Shape: {final_latent.shape}")
+        # FIX 1: Truncate latent to final frame anchor [B, 1, C, H, W]
+        # This reduces return size by ~24-32x
+        final_latent_anchor = final_latent[:, -1:].detach().cpu().clone() if final_latent is not None else None
+        
+        # Explicitly release internal pipeline references
+        del latents
+        del result
+        del final_latent
+        
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        
+        if final_latent_anchor is not None:
+            LOG.info(f"Temporal latent tensor output captured. Shape: {final_latent_anchor.shape}")
 
         LOG.info(f"Generated frames: {len(frames)}")
         
-        return frames, final_latent
+        return frames, final_latent_anchor
 
     
         

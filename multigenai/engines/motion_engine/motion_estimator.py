@@ -66,7 +66,20 @@ class MotionEstimator:
              flow[:, 0, :, :] *= float(w) / new_w
              flow[:, 1, :, :] *= float(h) / new_h
 
-        return flow.squeeze(0).cpu().numpy()
+        # Extract result and clean up massive intermediate tensors
+        flow_np = flow.squeeze(0).cpu().numpy()
+        
+        del img1
+        del img2
+        del flow
+        del list_of_flows
+        
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        return flow_np
 
     def warp_frame(self, frame: PILImage.Image, flow: np.ndarray) -> PILImage.Image:
         """
