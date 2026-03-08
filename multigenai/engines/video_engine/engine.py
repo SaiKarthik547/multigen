@@ -1,8 +1,8 @@
 """
-VideoEngine — True Temporal Video Generation using Stable Video Diffusion (SVD-XT).
+VideoEngine — True Temporal Video Generation using Stable Video Diffusion (SVD).
 
-Phase 6: Replaces the Phase 5 (Iterative SDXL img2img) hack with a pristine SVD-XT pipeline.
-- SVD-XT is loaded lazily, bypassing the global ModelRegistry.
+Phase 6: Replaces the Phase 5 (Iterative SDXL img2img) hack with a pristine SVD pipeline.
+- SVD is loaded lazily, bypassing the global ModelRegistry.
 - Uses `enable_sequential_cpu_offload()` for memory efficiency on Kaggle.
 - Direct `ffmpeg` byte-piping replaces slow `moviepy` dependencies.
 - Strict unload lifecycle (`gc.collect()`, `empty_cache()`, `ipc_collect()`) guarantees VRAM
@@ -31,7 +31,7 @@ LOG = get_logger(__name__)
 
 # Phase 6 Model Selection
 # SVD 1.1: Better motion coherence and temporal stability (XT = 25 frames)
-SVD_MODEL_ID = "stabilityai/stable-video-diffusion-img2vid-xt-1-1"
+SVD_MODEL_ID = "stabilityai/stable-video-diffusion-img2vid"
 
 # Global CUDA optimizations for memory efficiency and performance
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -55,7 +55,7 @@ class VideoEngine:
     True Temporal Video Generation Engine.
     
     Generates [B, T, C, H, W] latent frames from a single conditioning image in one
-    forward pass using SVD-XT, encodes directly using ffmpeg, and drops all weights
+    forward pass using SVD, encodes directly using ffmpeg, and drops all weights
     immediately from VRAM to prevent pipeline collisions.
     """
 
@@ -68,29 +68,44 @@ class VideoEngine:
 
     def _load_model(self) -> None:
         """
-        Lazily loads SVD-XT directly.
+        Lazily loads SVD directly.
         Diffusion models bypass ModelRegistry by design (Phase 7 isolation model).
         Uses sequential CPU offloading to prevent extreme memory spikes.
         """
         import torch
         from multigenai.models.temporal_svd_pipeline import TemporalStableVideoDiffusionPipeline
 
-        # Phase 6: Core SVD-XT model loading (fp16 for speed and VRAM economy)
-        # SVD-XT (25 frames) is used rather than SVD (14 frames) for better temporal depth.
+        # Phase 6: Core SVD model loading (fp16 for speed and VRAM economy)
+        # Base SVD (14 frames) is now used.
         try:
             self.pipe = TemporalStableVideoDiffusionPipeline.from_pretrained(
                 SVD_MODEL_ID,
                 torch_dtype=torch.float16,
                 variant="fp16"
             ).to(self.device)
+            
+            # Disable progress bar for Kaggle overhead reduction
+            self.pipe.set_progress_bar_config(disable=True)
+            
+            # Proactive cleanup to prevent fragmentation after weights move
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+                
         except Exception as e:
             LOG.error(f"Failed to load SVD pipeline: {e}")
             raise
 
         if self.device == "cuda":
-            self.pipe.enable_model_cpu_offload()
-            self.pipe.enable_vae_slicing()
-            self.pipe.enable_attention_slicing()
+            # Phase 14+: Defensive capability checks to avoid crashes on older/custom pipelines
+            if hasattr(self.pipe, "enable_model_cpu_offload"):
+                self.pipe.enable_model_cpu_offload()
+            
+            if hasattr(self.pipe, "enable_vae_slicing"):
+                self.pipe.enable_vae_slicing()
+                
+            if hasattr(self.pipe, "enable_attention_slicing"):
+                self.pipe.enable_attention_slicing()
             
             # Phase 14: Kaggle Optimization — torch.backends.cuda.enable_flash_sdp(True)
             torch.backends.cuda.enable_flash_sdp(True)
@@ -112,11 +127,11 @@ class VideoEngine:
 
     def _unload_model(self) -> None:
         """
-        Forcefully unloads the SVD-XT pipeline from system and GPU memory.
+        Forcefully unloads the SVD pipeline from system and GPU memory.
         This must be called immediately after encoding to keep the environment
         sterile for incoming ImageEngine (SDXL) processes.
         """
-        LOG.debug("Unloading SVD-XT and clearing VRAM...")
+        LOG.debug("Unloading SVD and clearing VRAM...")
         if self.pipe:
             del self.pipe
             self.pipe = None
@@ -152,7 +167,7 @@ class VideoEngine:
         scene_index: int = 0
     ) -> tuple[List["PILImage"], torch.Tensor]:
         """
-        Executes the SVD-XT forward pass using Temporal Sliding-Window Diffusion.
+        Executes the SVD forward pass using Temporal Sliding-Window Diffusion.
         Splits generation into overlapping windows to minimize VRAM and maximize consistency.
         """
         import torch
@@ -161,13 +176,13 @@ class VideoEngine:
         # GPU/Device generators to avoid sync overhead during CUDA inference
         generator = torch.Generator(device=self.device).manual_seed(seed)
         
-        # SVD-XT quality baseline: 14 steps is almost identical to 25 but 40% faster
+        # SVD quality baseline: 14 steps is almost identical to 25 but 40% faster
         inference_steps = request.num_inference_steps if request.num_inference_steps > 0 else 14
         motion_bucket = max(0, min(255, int(request.temporal_strength * 255)))
         
         # Sliding Window Configuration
-        window_size = 25  # SVD-XT native depth
-        stride = 12       # ~50% overlap for smooth blending
+        window_size = 14  # SVD native depth
+        stride = 7        # 50% overlap for smooth blending
         
         all_frames: List["PILImage"] = []
         final_latents_capture: Optional[torch.Tensor] = None
