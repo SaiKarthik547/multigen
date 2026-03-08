@@ -180,57 +180,101 @@ class InterpolationEngine:
     # ------------------------------------------------------------------
 
     def interpolate(
-        self, frames: List["PILImage"], factor: int
-    ) -> List["PILImage"]:
+        self, frames: List[Union["PILImage", str]], factor: int = 2, base_fps: int = 6
+    ) -> List[str]:
         """
-        Expand a list of SVD keyframes by inserting (factor-1) RIFE-generated
-        intermediate frames between each adjacent pair.
-
-        Args:
-            frames:  List of PIL Images from VideoEngine
-            factor:  Multiplication factor (1 = passthrough, 2 = double, etc.)
-
-        Returns:
-            Expanded list of PIL Images.
-            On failure: original frames unchanged (graceful degradation).
+        Expand a list of SVD keyframes by inserting intermediate frames.
+        Works in disk-streaming mode: accepts paths, returns paths.
         """
+        import pathlib
+        from PIL import Image
+        
+        target_fps = 24
+        if factor <= 0:
+             factor = max(1, target_fps // base_fps)
+             LOG.info(f"InterpolationEngine: Auto-calculated factor={factor} (base={base_fps})")
+
         if factor == 1 or len(frames) < 2:
-            LOG.debug(f"InterpolationEngine: factor=1 or frames<2, passthrough.")
-            return frames
+            return [str(f) if isinstance(f, (str, pathlib.Path)) else f for f in frames]
 
         try:
             self._load_model()
-
             if self._model is None:
-                LOG.warning("InterpolationEngine: RIFE model unavailable — returning original frames.")
-                return frames
+                return [str(f) if isinstance(f, (str, pathlib.Path)) else f for f in frames]
 
-            LOG.info(
-                f"InterpolationEngine: Interpolating {len(frames)} frames "
-                f"with factor={factor}. "
-                f"Expected output: {len(frames) + (len(frames) - 1) * (factor - 1)} frames."
-            )
+            # Output cache dir for interpolated run
+            # Use the parent of the first frame if it's a path
+            if isinstance(frames[0], (str, pathlib.Path)):
+                base_dir = pathlib.Path(frames[0]).parent.parent
+            else:
+                base_dir = self._ctx.output_dir / "temp"
+                
+            out_cache = base_dir / ".interpolated_frames"
+            out_cache.mkdir(parents=True, exist_ok=True)
+            
+            expanded_paths: List[str] = []
+            frame_idx = 0
 
-            expanded: List["PILImage"] = []
+            LOG.info(f"InterpolationEngine: Processing {len(frames)} keyframes (factor={factor}).")
+
             for i in range(len(frames) - 1):
-                expanded.append(frames[i])
-                intermediates = self._interpolate_pair(frames[i], frames[i + 1], factor)
-                expanded.extend(intermediates)
+                # Load Pair (Handle both PIL and Path)
+                source0, source1 = frames[i], frames[i+1]
+                
+                # Context manager for f0
+                if isinstance(source0, (str, pathlib.Path)):
+                    img0_ctx = Image.open(source0)
+                else:
+                    img0_ctx = source0 # Already an Image
+                
+                # Context manager for f1
+                if isinstance(source1, (str, pathlib.Path)):
+                    img1_ctx = Image.open(source1)
+                else:
+                    img1_ctx = source1
+                    
+                try:
+                    f0 = img0_ctx.convert("RGB")
+                    f1 = img1_ctx.convert("RGB")
+                    
+                    # 1. Save F0
+                    out_f0 = out_cache / f"frame_{frame_idx:04d}.png"
+                    f0.save(out_f0)
+                    expanded_paths.append(str(out_f0))
+                    frame_idx += 1
+                    
+                    # 2. Interpolate
+                    intermediates = self._interpolate_pair(f0, f1, factor)
+                    for interf in intermediates:
+                        out_f = out_cache / f"frame_{frame_idx:04d}.png"
+                        interf.save(out_f)
+                        expanded_paths.append(str(out_f))
+                        frame_idx += 1
+                finally:
+                    # Only close if we opened it
+                    if isinstance(source0, (str, pathlib.Path)):
+                        img0_ctx.close()
+                    if isinstance(source1, (str, pathlib.Path)):
+                        img1_ctx.close()
+                
+            # Save Last Frame (Handle both)
+            source_last = frames[-1]
+            if isinstance(source_last, (str, pathlib.Path)):
+                with Image.open(source_last) as img_last:
+                    out_last = out_cache / f"frame_{frame_idx:04d}.png"
+                    img_last.convert("RGB").save(out_last)
+            else:
+                out_last = out_cache / f"frame_{frame_idx:04d}.png"
+                source_last.convert("RGB").save(out_last)
+            
+            expanded_paths.append(str(out_last))
 
-            expanded.append(frames[-1])  # always include the last keyframe
-
-            LOG.info(
-                f"InterpolationEngine: Complete. "
-                f"{len(frames)} → {len(expanded)} frames."
-            )
-            return expanded
+            LOG.info(f"InterpolationEngine: Complete. {len(frames)} -> {len(expanded_paths)} frames.")
+            return expanded_paths
 
         except Exception as exc:
-            LOG.warning(
-                f"InterpolationEngine: Interpolation failed ({exc}). "
-                f"Returning original frames."
-            )
-            return frames
+            LOG.warning(f"InterpolationEngine: Failed ({exc}) - returning original paths.")
+            return [str(f) if isinstance(f, (str, pathlib.Path)) else f for f in frames]
 
         finally:
             if self._ctx.behaviour.auto_unload_after_gen:

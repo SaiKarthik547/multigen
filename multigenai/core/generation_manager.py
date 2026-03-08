@@ -306,25 +306,28 @@ class GenerationManager:
                         c_path = warp_path
                 
                 # generate_frames now returns already-truncated latent anchors [B, 1, C, H, W]
+                # frames is now a List[str] (paths to PNGs)
                 frames, final_latent_anchor, out_path, seed = video_engine.generate_frames(
                     seg_request, 
                     c_path,
-                    previous_latent=temporal_state.previous_latent
+                    previous_latent=temporal_state.previous_latent,
+                    scene_index=temporal_state.scene_index
                 )
                 seg_frames.append((seg, frames, out_path, seed))
                 
                 # Phase 11: Update Temporal State
                 if frames:
-                    temporal_state.previous_frame = frames[-1]
+                    # Load the last frame path into a PIL image for MotionEstimator
+                    from PIL import Image
+                    temporal_state.previous_frame = Image.open(frames[-1]).convert("RGB")
+                    
                     # FIX 10: Store already-truncated anchor
                     temporal_state.previous_latent = final_latent_anchor
                     temporal_state.scene_index += 1
                     
-                    # Push the last generated keyframe into SceneMemory to serve as the 
-                    # semantic & structural 'reference_frame' for the next generated segment
-                    # Use deepcopy to prevent pointer mutation issues across segments
+                    # Push the last generated keyframe into SceneMemory
                     self._ctx.scene_memory.update(
-                        reference_frame=frames[-1],
+                        reference_frame=temporal_state.previous_frame,
                         temporal_state=copy.deepcopy(temporal_state)
                     )
 
@@ -361,31 +364,66 @@ class GenerationManager:
             interp_engine = InterpolationEngine(self._ctx)
             
         try:
-            # Phase 11: Scene Transition Blending
+            # Phase 11/14: Scene Transition Blending & Global Interpolation
+            # Strategy: Combine all segments into one global list, blend boundaries, then interpolate ONCE.
             if plan.is_multi_segment and len(seg_frames) > 1:
-                LOG.info("GenerationManager: Applying temporal alpha-blending across scene boundaries...")
-                final_frames = []
+                LOG.info("GenerationManager: Merging segments and blending boundaries...")
+                global_frame_paths = []
+                
+                blend_window = 4
+                from PIL import Image
+                
                 for i in range(len(seg_frames)):
-                    seg, frames, out_path, seed = seg_frames[i]
-                    if interp_engine:
-                        frames = interp_engine.interpolate(frames, request.interpolation_factor)
+                    seg, frames, op, s = seg_frames[i]
                     
-                    if not final_frames:
-                        final_frames = frames
+                    if not global_frame_paths:
+                        global_frame_paths = list(frames)
                     else:
-                        final_frames = TransitionEngine.blend(final_frames, frames, window=4)
+                        # Perform temporal alpha-blending at the boundary
+                        overlap_a_paths = global_frame_paths[-blend_window:]
+                        overlap_b_paths = frames[:blend_window]
+                        
+                        # Load images for blending
+                        img_a = [Image.open(p) for p in overlap_a_paths]
+                        img_b = [Image.open(p) for p in overlap_b_paths]
+                        
+                        blended_images = TransitionEngine.blend(img_a, img_b, window=blend_window)
+                        
+                        # Save blended frames to a "blends" subfolder in the first segment's temp dir
+                        # This keeps them within a folder that VideoEngine.encode will clean up.
+                        first_frame_path = pathlib.Path(global_frame_paths[0])
+                        blend_dir = first_frame_path.parent / "blends"
+                        blend_dir.mkdir(exist_ok=True)
+                        
+                        new_blend_paths = []
+                        for idx, bimg in enumerate(blended_images):
+                            bp = blend_dir / f"blend_{i}_{idx:02d}.png"
+                            bimg.save(bp)
+                            new_blend_paths.append(str(bp))
+                        
+                        # Replace the tail of A and head of B with the blended sequence
+                        global_frame_paths = global_frame_paths[:-blend_window] + new_blend_paths + list(frames[blend_window:])
+                        
+                        # Cleanup
+                        for img in img_a + img_b: img.close()
+
+                # Global Interpolation (Interpolate once for consistent motion)
+                if interp_engine:
+                    LOG.info(f"GenerationManager: Interpolating global sequence (factor={request.interpolation_factor})...")
+                    global_frame_paths = interp_engine.interpolate(global_frame_paths, request.interpolation_factor)
                 
                 # Treat as one giant sequence for encoding
                 seg, _, out_path, seed = seg_frames[0]
                 seg_result = VideoEngine.encode(
-                    frames=final_frames,
+                    frames=global_frame_paths,
                     out_path=out_path,
                     fps=request.fps,
                     seed=seed,
-                    requested_frames=request.num_frames * plan.segment_count,
+                    requested_frames=len(global_frame_paths),
                 )
                 results.append(seg_result)
             else:
+                # Single segment or simple linear processing
                 for seg, frames, out_path, seed in seg_frames:
                     if interp_engine:
                         frames = interp_engine.interpolate(frames, request.interpolation_factor)

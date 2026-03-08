@@ -3,9 +3,10 @@ import torch.nn.functional as F
 import numpy as np
 from PIL import Image as PILImage
 from typing import Optional, List
-from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
+from torchvision.models.optical_flow import raft_small, Raft_Small_Weights
 from torchvision.transforms import functional as TF
 from multigenai.core.logging.logger import get_logger
+import gc
 
 LOG = get_logger(__name__)
 
@@ -16,10 +17,10 @@ class MotionEstimator:
     def __init__(self, device: str = "cpu"):
         self.device = device
         try:
-            self.weights = Raft_Large_Weights.DEFAULT
-            self.model = raft_large(weights=self.weights, progress=False).to(device)
+            self.weights = Raft_Small_Weights.DEFAULT
+            self.model = raft_small(weights=self.weights, progress=False).to(device)
             self.model.eval()
-            LOG.info("MotionEstimator: RAFT model loaded successfully.")
+            LOG.info("MotionEstimator: RAFT small model loaded successfully.")
         except Exception as e:
             LOG.error(f"MotionEstimator: Failed to load RAFT model: {e}")
             self.model = None
@@ -33,27 +34,37 @@ class MotionEstimator:
             LOG.info("MotionEstimator: RAFT model unloaded.")
 
     def estimate(self, frame_a: PILImage.Image, frame_b: PILImage.Image) -> Optional[np.ndarray]:
-        """Estimate optical flow between two frames using RAFT large."""
+        """
+        Estimate optical flow between two frames using RAFT large.
+        Optimized: Runs at 1/2 resolution for 2x speed and lower VRAM.
+        """
         if self.model is None:
             return None
             
-        img1 = TF.to_tensor(frame_a).unsqueeze(0).to(self.device)
-        img2 = TF.to_tensor(frame_b).unsqueeze(0).to(self.device)
-        
-        # RAFT guard: ensure RGB input
-        if img1.shape[1] != 3:
-            raise ValueError(f"MotionEstimator: RAFT expects RGB input (3 channels), got {img1.shape[1]}")
+        # Cheap early-exit for static scenes (Mean Absolute Error)
+        # SVD generation sometimes produces nearly identical frames in still scenes.
+        a_np = np.array(frame_a.resize((128, 128), PILImage.NEAREST)).astype(np.float32)
+        b_np = np.array(frame_b.resize((128, 128), PILImage.NEAREST)).astype(np.float32)
+        mae = np.abs(a_np - b_np).mean()
+        if mae < 1.0:
+            LOG.info(f"MotionEstimator: Scene is static (MAE={mae:.2f}) — skipping RAFT.")
+            return None
+
+        # 1/2 Resolution Downsampling for RAFT efficiency
+        w, h = frame_a.size
+        img1 = TF.to_tensor(frame_a.resize((w // 2, h // 2), PILImage.BILINEAR)).unsqueeze(0).to(self.device)
+        img2 = TF.to_tensor(frame_b.resize((w // 2, h // 2), PILImage.BILINEAR)).unsqueeze(0).to(self.device)
         
         # RAFT expects inputs to be multiples of 8
-        h, w = img1.shape[-2:]
-        new_h = (h // 8) * 8
-        new_w = (w // 8) * 8
+        h_half, w_half = img1.shape[-2:]
+        new_h = (h_half // 8) * 8
+        new_w = (w_half // 8) * 8
         
-        if h != new_h or w != new_w:
+        if h_half != new_h or w_half != new_w:
             img1 = F.interpolate(img1, size=(new_h, new_w), mode='bilinear', align_corners=False)
             img2 = F.interpolate(img2, size=(new_h, new_w), mode='bilinear', align_corners=False)
 
-        # RAFT expects images normalized to [-1, 1]
+        # RAFT normalized inputs [-1, 1]
         img1 = (img1 - 0.5) / 0.5
         img2 = (img2 - 0.5) / 0.5
         
@@ -61,20 +72,16 @@ class MotionEstimator:
             list_of_flows = self.model(img1, img2)
             flow = list_of_flows[-1]
             
-        if h != new_h or w != new_w:
-             flow = F.interpolate(flow, size=(h, w), mode='bilinear', align_corners=False)
-             flow[:, 0, :, :] *= float(w) / new_w
-             flow[:, 1, :, :] *= float(h) / new_h
+        # Upsample flow back to original resolution
+        flow = F.interpolate(flow, size=(h, w), mode='bilinear', align_corners=False)
+        # Rescale flow vectors to match new resolution
+        flow[:, 0, :, :] *= float(w) / new_w
+        flow[:, 1, :, :] *= float(h) / new_h
 
         # Extract result and clean up massive intermediate tensors
         flow_np = flow.squeeze(0).cpu().numpy()
         
-        del img1
-        del img2
-        del flow
-        del list_of_flows
-        
-        import gc
+        del img1, img2, flow, list_of_flows
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

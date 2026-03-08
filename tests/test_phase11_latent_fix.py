@@ -44,12 +44,13 @@ def test_latent_propagation_shape_guard(engine):
         mock_pipe.return_value = (mock_output, mock_latents)
         
         # This will call the pipe once in _generate_video
-        engine._generate_video(request, Image.new("RGB", (512, 512)), seed=42, num_frames=14, previous_latent=wrong_latent)
+        engine._generate_video(request, Image.new("RGB", (512, 512)), seed=42, num_frames=14, previous_latent=wrong_latent, scene_index=0)
         
         # Inspect call's kwargs
         call_kwargs = mock_pipe.call_args.kwargs
-        # Shape guard should have caught the mismatch and passed None to pipe
-        assert call_kwargs['latents'] is None
+        # Modern Behavior: Instead of discarding, we crop/heal to match w_frames_count
+        assert call_kwargs['latents'] is not None
+        assert call_kwargs['latents'].shape[1] == 14 # Cropped from 25 to 14
         assert call_kwargs['num_frames'] == 14
         assert call_kwargs['return_latents'] is True
 
@@ -77,7 +78,7 @@ def test_latent_propagation_real_injection(engine):
         
         mock_pipe.return_value = (mock_output, mock_latents)
         
-        engine._generate_video(request, Image.new("RGB", (512, 512)), seed=42, num_frames=14, previous_latent=correct_latent)
+        engine._generate_video(request, Image.new("RGB", (512, 512)), seed=42, num_frames=14, previous_latent=correct_latent, scene_index=0)
         
         # Inspect call's kwargs
         call_kwargs = mock_pipe.call_args.kwargs

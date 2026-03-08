@@ -76,30 +76,34 @@ class TemporalStableVideoDiffusionPipeline(StableVideoDiffusionPipeline):
             # scaling_factor is usually 0.18215 for SD/SVD
             scaling_factor = getattr(self.vae.config, "scaling_factor", 0.18215)
             
-            # Chunking decode to save VRAM (research-correct solution)
-            # This reduces peak memory spikes by ~4x
+            # High-precision VAE decoding (research-correct solution)
+            # SVD VAE often produces artifacts or NaN in FP16; we force FP32.
+            vae_dtype = self.vae.dtype
+            self.vae.to(torch.float32)
+            
             chunk_size = 4
             decoded_chunks = []
             
             for i in range(0, frames, chunk_size):
-                # Slice the latents for this chunk: [batch, frames_in_chunk, channels, h, w]
                 latent_chunk = latents[:, i:i + chunk_size]
                 b, f, c, h_lat, w_lat = latent_chunk.shape
                 
-                # Reshape for VAE: [batch * frames_in_chunk, channels, h, w]
-                latent_chunk_reshaped = latent_chunk.reshape(b * f, c, h_lat, w_lat)
+                # Reshape for VAE: [batch * f, c, h, w]
+                latent_chunk_reshaped = latent_chunk.to(torch.float32).reshape(b * f, c, h_lat, w_lat)
                 
-                # Part 1: VAE decode (No manual normalization here; processor handles it)
+                # SVD VAE expects latents / scaling_factor
                 decoded_chunk = self.vae.decode(
                     latent_chunk_reshaped / scaling_factor,
                     num_frames=f
                 ).sample
                 
-                # Part 2: Reshape back to (batch, frames_in_chunk, channels, H, W)
-                decoded_chunk = decoded_chunk.reshape(b, f, *decoded_chunk.shape[1:])
-                decoded_chunks.append(decoded_chunk.cpu())
+                # Reshape back to (batch, f, C, H, W)
+                decoded_chunks.append(decoded_chunk.reshape(b, f, *decoded_chunk.shape[1:]).cpu())
                 del decoded_chunk
                 
+            # Restore model dtype
+            self.vae.to(vae_dtype)
+            
             # Combine all chunks: [batch, frames, channels, H, W]
             decoded = torch.cat(decoded_chunks, dim=1)
             

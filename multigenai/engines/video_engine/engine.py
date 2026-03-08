@@ -30,7 +30,13 @@ if TYPE_CHECKING:
 LOG = get_logger(__name__)
 
 # Phase 6 Model Selection
-SVD_MODEL_ID = "stabilityai/stable-video-diffusion-img2vid-xt"
+# SVD 1.1: Better motion coherence and temporal stability (XT = 25 frames)
+SVD_MODEL_ID = "stabilityai/stable-video-diffusion-img2vid-xt-1-1"
+
+# Global CUDA optimizations for memory efficiency and performance
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
 
 
 @dataclass
@@ -85,6 +91,22 @@ class VideoEngine:
             self.pipe.enable_model_cpu_offload()
             self.pipe.enable_vae_slicing()
             self.pipe.enable_attention_slicing()
+            
+            # Phase 14: Kaggle Optimization — torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_flash_sdp(True)
+
+            try:
+                self.pipe.enable_xformers_memory_efficient_attention()
+                LOG.info("VideoEngine: Xformers memory-efficient attention enabled.")
+            except Exception:
+                LOG.debug("VideoEngine: Xformers not available, using SDP attention.")
+
+            # Phase 14: Speed boost — torch.compile(pipe.unet)
+            try:
+                LOG.info("VideoEngine: Compiling UNet for 20-30% speed boost...")
+                self.pipe.unet = torch.compile(self.pipe.unet, mode="reduce-overhead")
+            except Exception as e:
+                LOG.debug(f"VideoEngine: torch.compile failed (skipping): {e}")
         else:
             self.pipe = self.pipe.to(self.device)
 
@@ -110,12 +132,13 @@ class VideoEngine:
         except Exception as exc:
             LOG.warning(f"Error flushing CUDA memory: {exc}")
 
-    def renoise_latent(self, prev_latent: torch.Tensor, strength: float = 0.03) -> torch.Tensor:
+    def renoise_latent(self, prev_latent: torch.Tensor, scene_index: int = 0) -> torch.Tensor:
         """
         Inject minimal Gaussian noise into an existing latent tensor while preserving structure.
-
-        This maintains temporal continuity without degrading spatial detail.
+        Uses adaptive scheduling: strength increases with scene index to maintain motion vitality.
         """
+        # Phase 11+: Adaptive noise schedule
+        strength = 0.015 + (0.005 * min(10, scene_index))
         noise = torch.randn_like(prev_latent)
         return prev_latent + noise * strength
 
@@ -126,106 +149,148 @@ class VideoEngine:
         seed: int,
         num_frames: int,
         previous_latent: Optional[torch.Tensor] = None,
+        scene_index: int = 0
     ) -> tuple[List["PILImage"], torch.Tensor]:
         """
-        Executes the SVD-XT forward pass, returning a list of PIL Images and the final latents.
-
-        Args:
-            num_frames: Effective frame count to generate.
-            previous_latent: Optional latent tensor from a previous scene to maintain continuity.
+        Executes the SVD-XT forward pass using Temporal Sliding-Window Diffusion.
+        Splits generation into overlapping windows to minimize VRAM and maximize consistency.
         """
         import torch
+        from PIL import Image
 
-        # CPU generators: single RNG stream for the unified pass
-        generator = torch.Generator(device="cpu").manual_seed(seed)
+        # GPU/Device generators to avoid sync overhead during CUDA inference
+        generator = torch.Generator(device=self.device).manual_seed(seed)
         
-        # Map temporal_strength (0.0–1.0) to native SVD motion_bucket_id (0–255)
+        # SVD-XT quality baseline: 14 steps is almost identical to 25 but 40% faster
+        inference_steps = request.num_inference_steps if request.num_inference_steps > 0 else 14
         motion_bucket = max(0, min(255, int(request.temporal_strength * 255)))
         
+        # Sliding Window Configuration
+        window_size = 25  # SVD-XT native depth
+        stride = 12       # ~50% overlap for smooth blending
+        
+        all_frames: List["PILImage"] = []
+        final_latents_capture: Optional[torch.Tensor] = None
+        
+        # Determine windows
+        if num_frames <= window_size:
+            windows = [(0, num_frames)]
+        else:
+            windows = []
+            for start in range(0, num_frames - window_size + stride, stride):
+                end = min(start + window_size, num_frames)
+                windows.append((start, end))
+                if end == num_frames:
+                    break
+
         LOG.info(
-            f"Phase 11: Generating {num_frames} frames via SVD-XT (Single-Pass Optimization). "
-            f"Seed={seed}, resolution={request.width}x{request.height}, "
-            f"steps={request.num_inference_steps}, motion_bucket_id={motion_bucket}."
+            f"VideoEngine: Processing {num_frames} frames via {len(windows)} windows "
+            f"(size={window_size}, stride={stride}). Scene={scene_index}."
         )
 
-        # Safety Guard: Falls back if latent dimensions mismatch (e.g. frame count change)
-        if previous_latent is not None:
-            # SVD-XT diffusion latents shape: [batch, frames, channels, height/8, width/8]
-            if previous_latent.ndim != 5:
-                LOG.warning(f"Invalid latent rank: expected 5D, got {previous_latent.ndim}D. Resetting temporal state.")
-                previous_latent = None
-            else:
-                # Spatial dimension guard: ensure height/width match (H/8, W/8)
-                expected_h, expected_w = request.height // 8, request.width // 8
-                if previous_latent.shape[-2:] != (expected_h, expected_w):
-                    LOG.warning(
-                        f"Latent spatial mismatch: expected {(expected_h, expected_w)}, "
-                        f"got {previous_latent.shape[-2:]}. Resetting temporal state."
-                    )
-                    previous_latent = None
-                
-                # FIX 10: Handle single-frame anchor from previous scene
-                if previous_latent is not None and previous_latent.shape[1] == 1:
-                    LOG.debug(f"VideoEngine: Expanding single-frame latent anchor to {num_frames} frames.")
-                    previous_latent = previous_latent.repeat(1, num_frames, 1, 1, 1)
-                elif previous_latent is not None and previous_latent.shape[1] != num_frames:
-                    LOG.warning(f"Latent frame mismatch: expected {num_frames} or 1, got {previous_latent.shape[1]}. Resetting.")
-                    previous_latent = None
+        current_conditioning = conditioning_image
+        current_latent_input = previous_latent
 
-        latents = None
-        if previous_latent is not None:
-            # CRITICAL: ensure latent is on the correct device and dtype before injection
-            # Fix 3: Preserve precision by matching UNet dtype
-            previous_latent = previous_latent.to(
-                device=self.device,
-                dtype=self.pipe.unet.dtype
-            )
+        for i, (start, end) in enumerate(windows):
+            w_frames_count = end - start
             
-            # Fix 2: Remove clamping to preserve texture detail
-            latents = self.renoise_latent(previous_latent, strength=0.03)
-            LOG.info(f"Temporal latent tensor input shape: {latents.shape} (device={latents.device})")
+            # Preparation for this window
+            win_latents = None
+            if current_latent_input is not None:
+                # Ensure device/dtype match
+                current_latent_input = current_latent_input.to(self.device, dtype=self.pipe.unet.dtype)
+                
+                # Repeat last latent to fill window (more stable for diffusion than zeros)
+                if current_latent_input.shape[1] == 1:
+                    win_latents = current_latent_input.repeat(1, w_frames_count, 1, 1, 1)
+                elif current_latent_input.shape[1] != w_frames_count:
+                    if current_latent_input.shape[1] > w_frames_count:
+                        win_latents = current_latent_input[:, :w_frames_count]
+                    else:
+                        # Stability improvement: repeat the last encoded frame instead of zero tensor
+                        last_latent = current_latent_input[:, -1:]
+                        needed = w_frames_count - current_latent_input.shape[1]
+                        padding = last_latent.repeat(1, needed, 1, 1, 1)
+                        win_latents = torch.cat([current_latent_input, padding], dim=1)
+                else:
+                    win_latents = current_latent_input
 
-        # Unified single-pass: Generate both frames and propagate-friendly latents
-        # We use return_latents=True to get the 5D diffusion tensor directly from the pass
-        with torch.inference_mode():
-            result, final_latent = self.pipe(
-                image=conditioning_image,
-                num_frames=num_frames,
-                num_inference_steps=request.num_inference_steps,
-                height=request.height,
-                width=request.width,
-                generator=generator,
-                motion_bucket_id=motion_bucket,
-                decode_chunk_size=8,
-                output_type="pil",
-                latents=latents,
-                return_latents=True,
-                return_dict=True
-            )
-        
-        frames = result.frames[0]
-        
-        # FIX 1: Truncate latent to final frame anchor [B, 1, C, H, W]
-        # This reduces return size by ~24-32x
-        final_latent_anchor = final_latent[:, -1:].detach().cpu().clone() if final_latent is not None else None
-        
-        # Explicitly release internal pipeline references
-        del latents
-        del result
-        del final_latent
-        
-        import gc
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-        
-        if final_latent_anchor is not None:
-            LOG.info(f"Temporal latent tensor output captured. Shape: {final_latent_anchor.shape}")
+                # Inject noise
+                win_latents = self.renoise_latent(win_latents, scene_index=scene_index)
 
-        LOG.info(f"Generated frames: {len(frames)}")
+            LOG.debug(f"VideoEngine: Window {i} [{start}:{end}] starting...")
+            
+            with torch.inference_mode():
+                result, w_latents = self.pipe(
+                    image=current_conditioning,
+                    num_frames=w_frames_count,
+                    num_inference_steps=inference_steps,
+                    height=request.height,
+                    width=request.width,
+                    generator=generator,
+                    motion_bucket_id=motion_bucket,
+                    decode_chunk_size=min(8, w_frames_count),
+                    output_type="pil",
+                    latents=win_latents,
+                    return_latents=True,
+                    return_dict=True
+                )
+            
+            # Capture the very last frame's latent for the next SCENE (not just window)
+            if i == len(windows) - 1:
+                final_latents_capture = w_latents[:, -1:].detach().cpu().clone()
+
+            # Frames for this window
+            w_pil_frames = result.frames[0]
+            
+            # Update conditioning for next window if not at end
+            if i < len(windows) - 1:
+                current_conditioning = w_pil_frames[-1]
+                # Carry over last few frames of latents for temporal consistency
+                current_latent_input = w_latents[:, -stride:].detach().clone()
+
+            # Handle Overlap Blending (Linear Cross-Fade)
+            if i == 0:
+                all_frames.extend(w_pil_frames)
+            else:
+                overlap_len = len(all_frames) - start
+                if overlap_len > 0:
+                    existing_overlap = all_frames[start:]
+                    new_overlap = w_pil_frames[:overlap_len]
+                    
+                    blended = []
+                    for t in range(overlap_len):
+                        alpha = t / float(overlap_len)
+                        b_frame = Image.blend(existing_overlap[t], new_overlap[t], alpha)
+                        blended.append(b_frame)
+                    
+                    all_frames[start:] = blended
+                    all_frames.extend(w_pil_frames[overlap_len:])
+                else:
+                    all_frames.extend(w_pil_frames)
+
+            # Cleanup window
+            del result
+            del w_latents
+            del win_latents
+            gc.collect()
+            if torch.cuda.is_available() and (i % 2 == 1 or i == len(windows) - 1):
+                torch.cuda.empty_cache()
+
+        # Phase 13: Disk Streaming Cache
+        # Instead of returning raw PIL objects, we can save to a temp session directory
+        # to ensure RAM never spikes regardless of frame count.
+        temp_session_dir = self._out_dir / f".temp_frames_{seed}"
+        temp_session_dir.mkdir(parents=True, exist_ok=True)
+        frame_paths = []
         
-        return frames, final_latent_anchor
+        for idx, f in enumerate(all_frames):
+            f_path = temp_session_dir / f"frame_{idx:04d}.png"
+            f.save(f_path)
+            frame_paths.append(f_path)
+            
+        LOG.info(f"VideoEngine: Cached {len(all_frames)} frames to disk for streaming.")
+        return frame_paths, final_latents_capture
 
     
         
@@ -281,12 +346,22 @@ class VideoEngine:
             raise RuntimeError("ffmpeg is not installed or not in system PATH.")
 
         try:
-            # Stream frames one-by-one: no peak allocation of frames × W × H × 3 bytes
-            for frame in frames:
+            # Stream frames one-by-one from disk paths to save RAM
+            from PIL import Image
+            for frame_source in frames:
                 # Broken pipe guard
                 if process.poll() is not None:
                    raise RuntimeError("ffmpeg process terminated early during stream write.")
-                process.stdin.write(np.asarray(frame, dtype=np.uint8).tobytes())
+                
+                if isinstance(frame_source, (str, pathlib.Path)):
+                    with Image.open(frame_source) as img:
+                        frame_data = np.asarray(img.convert("RGB"), dtype=np.uint8)
+                else:
+                    # Fallback for raw PIL image objects
+                    frame_data = np.asarray(frame_source.convert("RGB"), dtype=np.uint8)
+                
+                process.stdin.write(frame_data.tobytes())
+                del frame_data
 
             process.stdin.close()         # EOF signal — ffmpeg begins muxing
 
@@ -318,6 +393,7 @@ class VideoEngine:
         request: "VideoGenerationRequest",
         conditioning_image_path: str,
         previous_latent: Optional[torch.Tensor] = None,
+        scene_index: int = 0
     ) -> tuple[List["PILImage"], torch.Tensor, pathlib.Path, int]:
         """
         Run SVD-XT generation and return (frames, final_latent, out_path, seed).
@@ -328,8 +404,9 @@ class VideoEngine:
         """
         from multigenai.engines.image_engine.engine import _slug
 
-        img_slug = _slug(request.prompt)
-        out_path = self._out_dir / f"{img_slug}.mp4"
+        # Use scene index in filename to avoid collisions during multi-segment runs
+        img_slug = _slug(request.prompt).strip("_")[:50]
+        out_path = self._out_dir / f"{img_slug}_seg{scene_index}.mp4"
 
         import torch
         seed = request.seed if request.seed is not None else int(
@@ -347,20 +424,17 @@ class VideoEngine:
             LOG.debug(f"Resizing conditioning image from {init_image.size} to {request.width}x{request.height}")
             init_image = init_image.resize((request.width, request.height), PILImage.Resampling.LANCZOS)
 
-        # Adaptive pixel-area frame cap (Kaggle/T4 VRAM hardening)
-        # Threshold: >600k pixels (1024×576=589k is fine; 1280×720=921k is not)
-        # Cap at 16 (not 8) — interpolation depends on keyframe count for
-        # output frame formula: n + (n-1)*(factor-1). Capping at 8 would
-        # silently halve interpolated output vs user expectation.
-        max_pixels = 600_000
-        max_svd_frames = 16
-        if request.width * request.height > max_pixels and effective_frames > max_svd_frames:
+        # Adaptive pixel-budget frame cap (Kaggle/T4 VRAM hardening)
+        # 16-24 for high res, up to 48 for standard 512x512
+        pixel_budget = 7_000_000
+        auto_max_frames = max(16, pixel_budget // (request.width * request.height))
+        
+        if effective_frames > auto_max_frames:
             LOG.warning(
-                f"High resolution {request.width}x{request.height} detected "
-                f"(pixels={request.width * request.height} > {max_pixels}). "
-                f"Capping frames {effective_frames} → {max_svd_frames} for VRAM stability."
+                f"VideoEngine: Resolution {request.width}x{request.height} "
+                f"exceeds pixel-budget. Capping frames {effective_frames} → {auto_max_frames}."
             )
-            effective_frames = max_svd_frames
+            effective_frames = auto_max_frames
 
         self._load_model()
 
@@ -370,7 +444,8 @@ class VideoEngine:
                 init_image, 
                 seed, 
                 effective_frames,
-                previous_latent=previous_latent
+                previous_latent=previous_latent,
+                scene_index=scene_index
             )
             del init_image
             return frames, final_latent, out_path, seed
@@ -387,70 +462,82 @@ class VideoEngine:
         requested_frames: int,
     ) -> "VideoResult":
         """
-        Encode a list of PIL frames to mp4 via ffmpeg and return VideoResult.
-
-        Defined as a staticmethod — callers (GenerationManager, generate() wrapper)
-        do not need to instantiate a full VideoEngine to encode an existing frame list.
-
-        Args:
-            frames:           Final (possibly interpolated) frame list
-            out_path:         pathlib.Path or str for output mp4
-            fps:              Frames per second
-            seed:             Seed used during generation (for VideoResult metadata)
-            requested_frames: Fallback frame count if frames list is empty
+        Encode a list of PIL frames (or frame paths) to mp4 via ffmpeg and return VideoResult.
         """
+        import numpy as np
+        import subprocess
+        from PIL import Image
+        import pathlib
+        import shutil
+
         _log = get_logger(__name__)
-        frame_count = len(frames) if frames else requested_frames  # capture BEFORE del
+        frame_count = len(frames) if frames else requested_frames
+        
+        if not frames:
+            return VideoResult(path="", frame_count=0, fps=fps, seed=seed, success=False, error="No frames provided.")
+
+        # Determine dimensions from first frame source
+        try:
+            if isinstance(frames[0], (str, pathlib.Path)):
+                with Image.open(frames[0]) as first_img:
+                    width, height = first_img.size
+            else:
+                width, height = frames[0].size
+        except Exception as e:
+            return VideoResult(path="", frame_count=0, fps=fps, seed=seed, success=False, error=f"Invalid frame format: {e}")
+
+        _log.info(f"Encoding {frame_count} frames ({width}x{height}) to {out_path}")
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "rawvideo", "-vcodec", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-s", f"{width}x{height}",
+            "-r", str(fps),
+            "-i", "-",
+            "-an",
+            "-vcodec", "libx264",
+            "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p",
+            str(out_path),
+        ]
 
         try:
-            # Import _encode_video logic inline via a temporary engine-free subprocess call
-            import numpy as np
-            import subprocess
+            process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        except FileNotFoundError:
+            return VideoResult(path="", frame_count=0, fps=fps, seed=seed, success=False, error="ffmpeg not found.")
 
-            if not frames:
-                raise ValueError("No frames to encode.")
+        try:
+            for frame_source in frames:
+                # Broken pipe guard
+                if process.poll() is not None:
+                   break
+                
+                if isinstance(frame_source, (str, pathlib.Path)):
+                    with Image.open(frame_source) as img:
+                        frame_data = np.asarray(img.convert("RGB"), dtype=np.uint8)
+                else:
+                    frame_data = np.asarray(frame_source.convert("RGB"), dtype=np.uint8)
+                
+                process.stdin.write(frame_data.tobytes())
+                del frame_data
 
-            width, height = frames[0].size
-            _log.info(f"Encoding {frame_count} frames ({width}x{height}) to {out_path}")
+            process.stdin.close()
+            return_code = process.wait()
+            stderr_bytes = process.stderr.read()
 
-            cmd = [
-                "ffmpeg", "-y",
-                "-f", "rawvideo", "-vcodec", "rawvideo",
-                "-pix_fmt", "rgb24",
-                "-s", f"{width}x{height}",
-                "-r", str(fps),
-                "-i", "-",
-                "-an",
-                "-vcodec", "libx264",
-                "-preset", "ultrafast",
-                "-pix_fmt", "yuv420p",
-                str(out_path),
-            ]
+            if return_code != 0:
+                raise RuntimeError(f"FFmpeg failed: {stderr_bytes.decode(errors='replace')}")
 
-            try:
-                process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-            except FileNotFoundError:
-                raise RuntimeError("ffmpeg is not installed or not in system PATH.")
-
-            try:
-                for frame in frames:
-                    process.stdin.write(np.asarray(frame, dtype=np.uint8).tobytes())
-                process.stdin.close()
-                return_code = process.wait()
-                stderr_bytes = process.stderr.read()
-                if return_code != 0:
-                    raise RuntimeError(
-                        f"FFmpeg encoding failed (code {return_code}):\n"
-                        f"{stderr_bytes.decode(errors='replace')}"
-                    )
-            except RuntimeError:
-                raise
-            except Exception as exc:
-                process.kill()
-                process.wait()
-                raise RuntimeError(f"Video encoding failed: {exc}") from exc
-
-            del frames  # release memory AFTER we've finished using it
+            # Phase 14: Temp Session Cleanup
+            if frames and isinstance(frames[0], (str, pathlib.Path)):
+                p = pathlib.Path(frames[0])
+                if ".temp_frames_" in p.parent.name:
+                    try:
+                        shutil.rmtree(p.parent)
+                        _log.debug(f"VideoEngine: Cleaned up temp path: {p.parent}")
+                    except Exception as e:
+                        _log.warning(f"VideoEngine: Cleanup failure: {e}")
 
             return VideoResult(
                 path=str(out_path),
@@ -460,11 +547,11 @@ class VideoEngine:
                 success=True,
             )
         except Exception as exc:
-            _log.error(f"Video encoding error: {exc}", exc_info=True)
-            return VideoResult(
-                path="", frame_count=0, fps=fps, seed=seed,
-                success=False, error=str(exc)
-            )
+            if 'process' in locals() and process.poll() is None:
+                process.kill()
+                process.wait()
+            _log.error(f"Video encoding error: {exc}")
+            return VideoResult(path="", frame_count=0, fps=fps, seed=seed, success=False, error=str(exc))
 
 
     def generate(

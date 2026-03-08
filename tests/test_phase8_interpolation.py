@@ -35,11 +35,22 @@ def _make_frames(n: int) -> list:
     ]
     return [PILImage.new("RGB", (64, 64), color=c) for c in colors]
 
+def _make_paths(n: int, tmp_path) -> list[str]:
+    """Save n frames to tmp_path and return their string paths."""
+    frames = _make_frames(n)
+    paths = []
+    for i, f in enumerate(frames):
+        p = tmp_path / f"test_{i}.png"
+        f.save(p)
+        paths.append(str(p))
+    return paths
 
-def _mock_ctx():
+def _mock_ctx(tmp_path=None):
     ctx = MagicMock()
     ctx.device = "cpu"
-    ctx.settings.output_dir = "/tmp/test_out"
+    ctx.output_dir = tmp_path if tmp_path else pathlib.Path("/tmp/test_out")
+    ctx.settings = MagicMock()
+    ctx.settings.output_dir = str(ctx.output_dir)
     return ctx
 
 
@@ -78,29 +89,31 @@ class TestFrameCountFormula:
 # ---------------------------------------------------------------------------
 
 class TestPassthrough:
-    def test_factor_1_returns_original(self):
-        """InterpolationEngine with factor=1 must return the original list unchanged."""
+    def test_factor_1_returns_original(self, tmp_path):
+        """InterpolationEngine with factor=1 must return paths for all frames (even if input was PIL)."""
         from multigenai.engines.interpolation_engine.engine import InterpolationEngine
 
-        ctx = _mock_ctx()
+        ctx = _mock_ctx(tmp_path)
         engine = InterpolationEngine(ctx)
         frames = _make_frames(8)
 
         result = engine.interpolate(frames, factor=1)
 
-        assert result is frames  # same object, no copy
+        # In current design, factors <= 1 return a NEW list of same objects
         assert len(result) == 8
+        assert result == frames 
 
-    def test_single_frame_passthrough(self):
-        """Only 1 frame — no pairs, always passthrough."""
+    def test_single_frame_passthrough(self, tmp_path):
+        """Only 1 frame — no pairs, returns same list content."""
         from multigenai.engines.interpolation_engine.engine import InterpolationEngine
 
-        ctx = _mock_ctx()
+        ctx = _mock_ctx(tmp_path)
         engine = InterpolationEngine(ctx)
         frames = _make_frames(1)
 
         result = engine.interpolate(frames, factor=2)
-        assert result is frames
+        assert len(result) == 1
+        assert result == frames
 
 
 # ---------------------------------------------------------------------------
@@ -200,11 +213,11 @@ class TestSchemaValidation:
 # ---------------------------------------------------------------------------
 
 class TestLifecycleOnSuccess:
-    def test_unload_called_after_successful_interpolation(self):
+    def test_unload_called_after_successful_interpolation(self, tmp_path):
         """_unload_model must be called after successful interpolate()."""
         from multigenai.engines.interpolation_engine.engine import InterpolationEngine
 
-        ctx = _mock_ctx()
+        ctx = _mock_ctx(tmp_path)
         engine = InterpolationEngine(ctx)
         frames = _make_frames(4)
 
@@ -216,12 +229,13 @@ class TestLifecycleOnSuccess:
             result = engine.interpolate(frames, factor=2)
 
         mock_unload.assert_called_once()
+        assert len(result) == 7 # (4 keyframes + 3 intermediates)
 
-    def test_unload_called_on_failure(self):
+    def test_unload_called_on_failure(self, tmp_path):
         """_unload_model must be called even when _interpolate_pair raises."""
         from multigenai.engines.interpolation_engine.engine import InterpolationEngine
 
-        ctx = _mock_ctx()
+        ctx = _mock_ctx(tmp_path)
         engine = InterpolationEngine(ctx)
         frames = _make_frames(4)
 
@@ -232,8 +246,9 @@ class TestLifecycleOnSuccess:
                 result = engine.interpolate(frames, factor=2)
 
         mock_unload.assert_called_once()
-        # Graceful degradation — original frames returned
-        assert result is frames
+        # Original frames returned (not necessarily paths if input was PIL)
+        assert len(result) == 4
+        assert result == frames
 
 
 # ---------------------------------------------------------------------------
@@ -241,11 +256,11 @@ class TestLifecycleOnSuccess:
 # ---------------------------------------------------------------------------
 
 class TestGracefulDegradation:
-    def test_returns_original_when_model_is_none(self):
-        """If _load_model results in self._model = None, original frames must be returned."""
+    def test_returns_original_when_model_is_none(self, tmp_path):
+        """If _load_model results in self._model = None, original frames must be returned (as paths)."""
         from multigenai.engines.interpolation_engine.engine import InterpolationEngine
 
-        ctx = _mock_ctx()
+        ctx = _mock_ctx(tmp_path)
         engine = InterpolationEngine(ctx)
         frames = _make_frames(6)
 
@@ -258,14 +273,14 @@ class TestGracefulDegradation:
             with patch.object(engine, "_unload_model"):
                 result = engine.interpolate(frames, factor=2)
 
-        assert result is frames
         assert len(result) == 6
+        assert result == frames
 
-    def test_returns_original_on_loader_exception(self):
-        """If model loading raises, original frames are returned (no crash)."""
+    def test_returns_original_on_loader_exception(self, tmp_path):
+        """If model loading raises, original frames are returned."""
         from multigenai.engines.interpolation_engine.engine import InterpolationEngine
 
-        ctx = _mock_ctx()
+        ctx = _mock_ctx(tmp_path)
         engine = InterpolationEngine(ctx)
         frames = _make_frames(4)
 
@@ -273,7 +288,8 @@ class TestGracefulDegradation:
              patch.object(engine, "_unload_model"):
             result = engine.interpolate(frames, factor=2)
 
-        assert result is frames
+        assert len(result) == 4
+        assert result == frames
 
 
 # ---------------------------------------------------------------------------
