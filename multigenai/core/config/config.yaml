@@ -49,7 +49,7 @@ sdxl:
   refiner_denoising_start: 0.8   # Fraction where refiner takes over
   vae_float32: false              # false = both pipelines stay pure fp16 (no dtype mismatch)
   num_inference_steps: 50         # Total steps (base sees 0→0.8, refiner sees 0.8→1.0)
-  guidance_scale: 7.5             # Classifier-free guidance (SDXL canonical default)
+  guidance_scale: 6.5             # Classifier-free guidance (SDXL canonical default)
   # Kaggle / T4 stable resolution — drops peak VRAM by ~30% vs 1024×1024
   default_width: 768
   default_height: 768

@@ -68,7 +68,7 @@ class SDXLSettings:
     refiner_denoising_start: float = 0.8
     vae_float32: bool = False          # False = pure fp16; no dtype mismatch with refiner
     num_inference_steps: int = 50
-    guidance_scale: float = 7.5
+    guidance_scale: float = 6.5
     # Kaggle-safe default resolution (768 drops peak VRAM ~30% vs 1024)
     default_width: int = 768
     default_height: int = 768
@@ -277,7 +277,7 @@ def get_settings(config_path: Optional[pathlib.Path] = None) -> Settings:
             ),
             guidance_scale=_env_float(
                 "sdxl_guidance_scale",
-                float(sdxl_raw.get("guidance_scale", 7.5)),
+                float(sdxl_raw.get("guidance_scale", 6.5)),
             ),
             default_width=int(
                 _env_float(

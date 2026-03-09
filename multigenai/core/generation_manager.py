@@ -73,25 +73,31 @@ class GenerationManager:
         """
         Orchestrate SDXL image generation with Phase 9 prompt processing.
 
-        For multi-segment plans the first successful segment's result is
-        returned; all segments are generated and saved independently.
+        Enforces single-segment generation for consistency and leverages
+        SceneMemory for character identity persistence across sessions.
         """
         LOG.info("GenerationManager: Preparing ImageEngine pipeline (SDXL)...")
         from multigenai.creative.scene_designer import SceneDesigner
         from multigenai.creative.prompt_compiler import PromptCompiler
         from multigenai.core.model_lifecycle import ModelLifecycle
+        from PIL import Image
 
-        # --- Phase 9: process prompt ---
+        # --- Phase 9/12: process prompt (force single segment for images) ---
         processor = self._build_processor(model_name=request.model_name)
         plan = processor.process(
             prompt=request.prompt,
             negative_prompt=getattr(request, "negative_prompt", ""),
             model_name=request.model_name,
+            force_single_segment=True,
         )
 
         original_unload = self._ctx.behaviour.auto_unload_after_gen
         self._ctx.behaviour.auto_unload_after_gen = False  # Prevent unload during loop iteration
 
+        # Always start with a fresh memory if explicitly requested, otherwise reuse for consistency
+        # In this implementation, we assume one call = one coherent task.
+        # However, we don't reset() here to allow cross-call identity if pre-loaded.
+        
         results: List["ImageResult"] = []
         seg_dir = self._segmented_dir(plan.run_id) if plan.is_multi_segment else None
         
@@ -99,6 +105,8 @@ class GenerationManager:
         
         try:
             for seg in plan.segments:
+                scene_state = self._ctx.scene_memory.get()
+                
                 # Build a per-segment request with the processed prompts
                 seg_request = request.model_copy(update={"prompt": seg.positive})
 
@@ -111,27 +119,36 @@ class GenerationManager:
                 compiled_pos = processor._budget_mgr.trim_positive(compiled_pos)
 
                 try:
-                    result = engine.run(compiled_pos, compiled_neg, seg_request)
+                    result = engine.run(
+                        compiled_pos, 
+                        compiled_neg, 
+                        seg_request,
+                        ref_image=scene_state.character_reference,
+                        control_image=scene_state.reference_frame
+                    )
 
-                    if seg_dir is not None and result.success:
-                        result = self._relocate_result(result, seg_dir, seg.index, "png")
+                    if result.success:
+                        if seg_dir:
+                            result = self._relocate_result(result, seg_dir, seg.index, "png")
+                        
+                        # Phase 12: Capture identity for future consistency if not already anchored
+                        img_obj = Image.open(result.path).convert("RGB")
+                        if scene_state.character_reference is None:
+                            LOG.info("GenerationManager: Capturing first image as Character Reference.")
+                            self._ctx.scene_memory.update(character_reference=img_obj)
+                        
+                        # Update structural reference
+                        self._ctx.scene_memory.update(reference_frame=img_obj)
 
                     results.append(result)
-                    LOG.info(
-                        f"GenerationManager: Image segment {seg.index + 1}/{plan.segment_count} done. "
-                        f"path={result.path}"
-                    )
                 except Exception as exc:
-                    LOG.error(
-                        f"GenerationManager: Image segment {seg.index} failed: {exc}",
-                        exc_info=True,
-                    )
+                    LOG.error(f"GenerationManager: Image segment {seg.index} failed: {exc}", exc_info=True)
         finally:
             self._ctx.behaviour.auto_unload_after_gen = original_unload
             if engine and original_unload:
                 ModelLifecycle.safe_unload(engine)
 
-        # Return the first successful result (or the last attempt for error info)
+        # Return the first successful result
         for r in results:
             if r.success:
                 return r

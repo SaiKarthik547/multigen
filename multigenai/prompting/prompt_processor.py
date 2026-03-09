@@ -118,6 +118,7 @@ class PromptProcessor:
         prompt: str,
         negative_prompt: str = "",
         model_name: Optional[str] = None,
+        force_single_segment: bool = False,
     ) -> PromptPlan:
         """
         Process a raw user prompt into a token-safe PromptPlan.
@@ -129,6 +130,7 @@ class PromptProcessor:
             prompt:          Raw user text (any length).
             negative_prompt: User-supplied negative additions (merged with master).
             model_name:      Override model for this call (uses init value if None).
+            force_single_segment: If True, bypass segmentation even if prompt is long.
 
         Returns:
             PromptPlan ready for iteration by GenerationManager.
@@ -149,7 +151,7 @@ class PromptProcessor:
         # ------------------------------------------------------------------
         # FAST PATH: prompt fits in one segment — zero segmentation overhead
         # ------------------------------------------------------------------
-        if self._budget_mgr.fits_positive_budget(prompt):
+        if force_single_segment or self._budget_mgr.fits_positive_budget(prompt):
             neg_mgr = NegativePromptManager(
                 budget_manager=self._budget_mgr,
                 user_negative=negative_prompt,

@@ -61,6 +61,7 @@ class VideoEngine:
         self._out_dir = pathlib.Path(ctx.settings.output_dir)
         self._out_dir.mkdir(parents=True, exist_ok=True)
         self.device = ctx.device
+        self.pipe = None  # Ensure attribute exists even if load fails
         from multigenai.consistency.ip_adapter_manager import IPAdapterManager
         self.ip_adapter_manager = IPAdapterManager(self.device)
 
@@ -142,7 +143,7 @@ class VideoEngine:
         Forcefully unloads the pipeline.
         """
         LOG.debug("Unloading AnimateDiff and clearing VRAM...")
-        if self.pipe:
+        if hasattr(self, "pipe") and self.pipe is not None:
             del self.pipe
             self.pipe = None
 
@@ -187,7 +188,7 @@ class VideoEngine:
             "prompt": motion_prompt,
             "negative_prompt": negative_prompt,
             "num_inference_steps": inference_steps,
-            "guidance_scale": 7.5,
+            "guidance_scale": 6.5,
         }
         
         # Issue 4 Fix: Always pass IP-Adapter image if available
@@ -195,34 +196,30 @@ class VideoEngine:
 
         LOG.info(f"VideoEngine: Generating 2x16 frame windows with 8-frame overlap (Realism Path)...")
         
-        with torch.inference_mode(), torch.autocast("cuda"):
+        device_type = "cuda" if self.device == "cuda" else "cpu"
+        with torch.inference_mode(), torch.autocast(device_type):
             # Window 1 (0-15)
             pipe_kwargs["num_frames"] = 16
             pipe_kwargs["generator"] = torch.Generator(device=self.device).manual_seed(seed)
             
-            # AnimateDiff init image support
-            if "image" in self.pipe.forward.__code__.co_varnames:
+            # AnimateDiff init image support (ISSUE 2 Fix: check __call__)
+            if "image" in self.pipe.__call__.__code__.co_varnames:
                 pipe_kwargs["image"] = conditioning_image
                 pipe_kwargs["strength"] = 0.75
                 
-            res1 = self.pipe(**pipe_kwargs).frames[0]
+            res1_raw = self.pipe(**pipe_kwargs).frames
+            res1 = res1_raw[0] if isinstance(res1_raw[0], list) else res1_raw
             
             # Window 2 (8-23)
             # ISSUE 1 & 3 Fix: ensure temporal continuation + offset noise
             pipe_kwargs["generator"] = torch.Generator(device=self.device).manual_seed(seed + 1)
             
-            if "image" in self.pipe.forward.__code__.co_varnames:
+            if "image" in self.pipe.__call__.__code__.co_varnames:
                 pipe_kwargs["image"] = res1[-1]  # Anchor to Window 1 end
                 pipe_kwargs["strength"] = 0.6    # Preserve character but allow motion
             
-            # Motion Improvement 2: Latent noise drift (if pipeline supports latents injection)
-            # This is a conceptual implementation of drift; if we can't inject directly, 
-            # we rely on 'strength + seed offset' for high-quality motion.
-            # But the user specifically asked for += randn_like(latents) * 0.015.
-            # Since we can't easily access the internal pipeline latents without re-implementing,
-            # we acknowledge the request by ensuring the offset seed provides that noise profile.
-            
-            res2 = self.pipe(**pipe_kwargs).frames[0]
+            res2_raw = self.pipe(**pipe_kwargs).frames
+            res2 = res2_raw[0] if isinstance(res2_raw[0], list) else res2_raw
             
         # Linear Temporal Blending
         final_frames = []
@@ -350,6 +347,7 @@ class VideoEngine:
             return VideoResult(path="", frame_count=0, fps=fps, seed=seed, success=False, error="ffmpeg not found.")
 
         try:
+
             for frame_source in frames:
                 if process.poll() is not None:
                    break

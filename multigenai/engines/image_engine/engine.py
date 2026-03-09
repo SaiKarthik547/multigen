@@ -202,7 +202,7 @@ class ImageEngine:
         if use_ip_adapter:
             self.ip_adapter_manager.load(self.pipe)
             if hasattr(self.pipe, "set_ip_adapter_scale"):
-                self.pipe.set_ip_adapter_scale(0.70)
+                self.pipe.set_ip_adapter_scale(0.6)
 
         # --- Apply memory optimizations ---
         if self.device == "cuda":
@@ -256,7 +256,7 @@ class ImageEngine:
             "height": request.height,
             "generator": generator,
             "num_inference_steps": request.num_inference_steps,
-            "guidance_scale": 7.5,
+            "guidance_scale": 6.5,
             "output_type": "latent" if request.use_refiner else "pil",
         }
 

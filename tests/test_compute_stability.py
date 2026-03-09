@@ -368,7 +368,7 @@ class TestSDXLSettings:
         assert s.refiner_denoising_start == 0.8
         assert s.vae_float32 is False        # pure fp16 — no dtype mismatch
         assert s.num_inference_steps == 50
-        assert s.guidance_scale == 7.5
+        assert s.guidance_scale == 6.5
         assert s.default_width == 768
         assert s.default_height == 768
 
@@ -378,7 +378,7 @@ class TestSDXLSettings:
         s = get_settings()
         assert hasattr(s, "sdxl")
         assert s.sdxl.num_inference_steps == 50
-        assert s.sdxl.guidance_scale == 7.5
+        assert s.sdxl.guidance_scale == 6.5
 
     def test_env_override_use_refiner(self, monkeypatch):
         """MGOS_SDXL_USE_REFINER=false disables the refiner stage."""

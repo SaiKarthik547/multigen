@@ -129,7 +129,7 @@ class SceneDesigner:
             SceneBlueprint tuned for temporal/video generation.
         """
         # Motion Improvement 1: Motion token injection
-        base_motion = "natural body movement, subtle environmental motion, walking animation, dynamic motion blur"
+        base_motion = "character walking animation, natural body movement, camera tracking shot, subtle environmental motion, floating particles drifting"
         
         # Motion Improvement 3: Camera trajectory system
         trajectories = {

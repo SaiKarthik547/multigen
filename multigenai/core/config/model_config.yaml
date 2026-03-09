@@ -1,11 +1,11 @@
-# Phase 12: Production Model Configuration for Kaggle T4
-image_model: "RunDiffusion/Juggernaut-XL-v9"
-video_model: "runwayml/stable-diffusion-v1-5"
-motion_adapter: "guoyww/animatediff-motion-adapter-v3"
-ip_adapter: "h94/IP-Adapter"
-interpolation_model: "rife"
-device: "cuda"
-precision: "fp16"
-enable_xformers: true
-enable_cpu_offload: true
-enable_vae_slicing: true
+# MultiGenAI — Model Registry Configuration
+# ---------------------------------------------------------------------------
+# This file maps model aliases to their HuggingFace repository IDs.
+# ---------------------------------------------------------------------------
+
+image_model: RunDiffusion/Juggernaut-XL-v9
+video_model: runwayml/stable-diffusion-v1-5
+motion_adapter: guoyww/animatediff-motion-adapter-v1-5-2
+controlnet_depth: diffusers/controlnet-depth-sdxl-1.0
+ip_adapter: h94/IP-Adapter
+ip_adapter_weight: ip-adapter-plus_sdxl_vit-h.safetensors

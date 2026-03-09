@@ -25,9 +25,9 @@ from typing import List
 # ---------------------------------------------------------------------------
 # Default budget constants (overridden by PromptSettings at runtime)
 # ---------------------------------------------------------------------------
-_DEFAULT_MAX_TOKENS: int = 75        # usable CLIP slots (BOS/EOS excluded from accounting)
-_DEFAULT_NEG_RESERVE: int = 15       # tokens reserved for negative prompt (user enforced positive+negative<=77)
-_DEFAULT_POS_BUDGET: int = _DEFAULT_MAX_TOKENS - _DEFAULT_NEG_RESERVE  # 60
+_DEFAULT_MAX_TOKENS: int = 135        # usable CLIP slots (BOS/EOS excluded from accounting)
+_DEFAULT_NEG_RESERVE: int = 15       # tokens reserved for negative prompt (user enforced positive+negative<=150)
+_DEFAULT_POS_BUDGET: int = _DEFAULT_MAX_TOKENS - _DEFAULT_NEG_RESERVE  # 120
 
 
 @dataclass(frozen=True)

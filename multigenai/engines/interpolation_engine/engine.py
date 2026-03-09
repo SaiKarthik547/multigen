@@ -192,22 +192,21 @@ class InterpolationEngine:
         from PIL import Image
         
         # Phase 12 Fix: Interpolation applied unnecessarily if base motion is sufficient
-        # Only interpolate if input FPS is below the cinematic threshold (12)
+        # Only interpolate if input FPS is below the cinematic threshold (8)
         resolved_factor = factor
         if factor > 1:
-             if base_fps < 12:
+             if base_fps <= 8:
                  resolved_factor = max(factor, 2)
                  LOG.info(f"InterpolationEngine: Low FPS ({base_fps}) detected. Enforcing factor={resolved_factor}.")
              else:
                  resolved_factor = 1
                  LOG.info(f"InterpolationEngine: Base FPS ({base_fps}) sufficient. Bypassing (factor=1).")
         
-        if resolved_factor == 1 or len(frames) < 2:
-            return [str(f) if isinstance(f, (str, pathlib.Path)) else f for f in frames]
-            
-        factor = resolved_factor
-
         try:
+            # Phase 12 Fix: Moved bypass inside try/finally to ensure mock cleanups (tests)
+            if resolved_factor == 1 or len(frames) < 2:
+                return [str(f) if isinstance(f, (str, pathlib.Path)) else f for f in frames]
+
             self._load_model()
             if self._model is None:
                 return [str(f) if isinstance(f, (str, pathlib.Path)) else f for f in frames]
