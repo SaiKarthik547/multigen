@@ -10,23 +10,34 @@ class IPAdapterManager:
         self.device = device
         self.adapter_loaded = False
 
-    def load(self, pipe) -> None:
+    def load(self, pipe, model_type: str = "sdxl") -> None:
         """
         Attaches IP-Adapter weights to the provided Diffusers pipeline.
-        Only loads once to prevent redundant disk/VRAM churn.
+        Supports both SDXL and SD1.5 (used by AnimateDiff).
         """
-        if self.adapter_loaded:
+        if self.adapter_loaded and getattr(self, "_current_model_type", None) == model_type:
             return
 
-        LOG.info("Loading IP-Adapter (h94/IP-Adapter sdxl_models)...")
-        pipe.load_ip_adapter(
-            "h94/IP-Adapter", 
-            subfolder="sdxl_models", 
-            weight_name="ip-adapter_sdxl.bin"
-        )
+        if model_type == "sdxl":
+            LOG.info("Loading SDXL IP-Adapter (sdxl_models/ip-adapter_sdxl.bin)...")
+            pipe.load_ip_adapter(
+                "h94/IP-Adapter", 
+                subfolder="sdxl_models", 
+                weight_name="ip-adapter_sdxl.bin"
+            )
+        elif model_type == "sd15":
+            LOG.info("Loading SD1.5 IP-Adapter (models/ip-adapter_sd15.bin)...")
+            pipe.load_ip_adapter(
+                "h94/IP-Adapter", 
+                subfolder="models", 
+                weight_name="ip-adapter_sd15.bin"
+            )
+        else:
+            raise ValueError(f"IPAdapterManager: Unsupported model_type '{model_type}'")
+
         pipe.set_ip_adapter_scale(0.6)
-        
         self.adapter_loaded = True
+        self._current_model_type = model_type
 
     def apply(self, pipe, reference_image) -> dict:
         """

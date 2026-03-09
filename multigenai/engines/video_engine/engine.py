@@ -97,8 +97,8 @@ class VideoEngine:
                 torch.cuda.ipc_collect()
 
             if use_ip_adapter:
-                LOG.info("VideoEngine: Loading IP-Adapter for visual conditioning...")
-                self.ip_adapter_manager.load(self.pipe)
+                LOG.info("VideoEngine: Loading IP-Adapter for visual conditioning (SD1.5)...")
+                self.ip_adapter_manager.load(self.pipe, model_type="sd15")
                 # Phase 12 Fix: Increase influence for character stability
                 if hasattr(self.pipe, "set_ip_adapter_scale"):
                     self.pipe.set_ip_adapter_scale(0.8)

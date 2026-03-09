@@ -200,9 +200,8 @@ class ImageEngine:
 
         # Apply IP-Adapter weights to pipeline if requested
         if use_ip_adapter:
-            self.ip_adapter_manager.load(self.pipe)
-            if hasattr(self.pipe, "set_ip_adapter_scale"):
-                self.pipe.set_ip_adapter_scale(0.6)
+            model_type = "sdxl" if is_xl else "sd15"
+            self.ip_adapter_manager.load(self.pipe, model_type=model_type)
 
         # --- Apply memory optimizations ---
         if self.device == "cuda":
