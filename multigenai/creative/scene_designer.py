@@ -114,24 +114,34 @@ class SceneDesigner:
             negative_prompt=request.negative_prompt,
         )
 
-    def design_video(self, request: "VideoGenerationRequest") -> SceneBlueprint:
+    def design_video(self, request: "VideoGenerationRequest", scene_index: int = 0) -> SceneBlueprint:
         """
         Produce a motion-aware SceneBlueprint from a VideoGenerationRequest.
 
         Used by GenerationManager to run the video's own prompt through the
-        creative layer, regardless of whether a conditioning image is provided.
-        Temporal lighting and motion phrasing are injected here (semantic only).
+        creative layer. Temporal lighting and motion phrasing are injected here.
 
         Args:
             request: Validated VideoGenerationRequest.
+            scene_index: Current segment index (for camera trajectory).
 
         Returns:
             SceneBlueprint tuned for temporal/video generation.
         """
-        # Video-specific atmosphere enrichment
+        # Motion Improvement 1: Motion token injection
+        base_motion = "natural body movement, subtle environmental motion, walking animation, dynamic motion blur"
+        
+        # Motion Improvement 3: Camera trajectory system
+        trajectories = {
+            0: "slow tracking shot",
+            1: "cinematic pan",
+            2: "dolly forward"
+        }
+        cam_desc = trajectories.get(scene_index % 3, "cinematic medium shot")
+
         motion = request.motion_hint.strip() if request.motion_hint else ""
         lighting = "continuous natural lighting, soft temporal shadows"
-        atmosphere = f"fluid motion, temporal coherence"
+        atmosphere = f"fluid motion, temporal coherence, {base_motion}"
         if motion:
             atmosphere = f"{atmosphere}, {motion}"
 
@@ -141,7 +151,7 @@ class SceneDesigner:
             environment="dynamic environment with motion",
             lighting=lighting,
             atmosphere=atmosphere,
-            camera_description="cinematic medium shot",
+            camera_description=cam_desc,
             rendering_style="cinematic",
             negative_prompt=request.negative_prompt,
         )
