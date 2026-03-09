@@ -34,14 +34,20 @@ if TYPE_CHECKING:
 
 LOG = get_logger(__name__)
 
+from multigenai.core.model_registry import ModelRegistry
+ 
 # ---------------------------------------------------------------------------
-# HuggingFace repo-id aliases (model_name → valid HF repo string)
+# Dynamic Model IDs (managed by model_config.yaml)
 # ---------------------------------------------------------------------------
+registry = ModelRegistry.instance()
+_PROD_XL = registry.get_config_value("image_model", "RunDiffusion/Juggernaut-XL-v9")
+
 MODEL_ALIASES: dict[str, str] = {
-    "sdxl-base":    "stabilityai/stable-diffusion-xl-base-1.0",
+    "sdxl-base":    _PROD_XL,
     "sdxl-refiner": "stabilityai/stable-diffusion-xl-refiner-1.0",
     "sd15":         "runwayml/stable-diffusion-v1-5",
     "sd-1.5":       "runwayml/stable-diffusion-v1-5",
+    "juggernaut-xl-v9": _PROD_XL,
 }
 
 REFINER_REPO = "stabilityai/stable-diffusion-xl-refiner-1.0"

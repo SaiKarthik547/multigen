@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import gc
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Union
 
 from multigenai.core.logging.logger import get_logger
 
@@ -180,22 +180,32 @@ class InterpolationEngine:
     # ------------------------------------------------------------------
 
     def interpolate(
-        self, frames: List[Union["PILImage", str]], factor: int = 2, base_fps: int = 6
+        self, frames: List[Union["PILImage", str]], factor: int = 2, base_fps: int = 8
     ) -> List[str]:
         """
-        Expand a list of SVD keyframes by inserting intermediate frames.
+        Expand keyframes by inserting intermediate frames.
         Works in disk-streaming mode: accepts paths, returns paths.
+        
+        Phase 12: Dynamic interpolation to eliminate blur.
         """
         import pathlib
         from PIL import Image
         
-        target_fps = 24
-        if factor <= 0:
-             factor = max(1, target_fps // base_fps)
-             LOG.info(f"InterpolationEngine: Auto-calculated factor={factor} (base={base_fps})")
-
-        if factor == 1 or len(frames) < 2:
+        # Phase 12 Fix: Interpolation applied unnecessarily if base motion is sufficient
+        # Only interpolate if input FPS is below the cinematic threshold (12)
+        resolved_factor = factor
+        if factor > 1:
+             if base_fps < 12:
+                 resolved_factor = max(factor, 2)
+                 LOG.info(f"InterpolationEngine: Low FPS ({base_fps}) detected. Enforcing factor={resolved_factor}.")
+             else:
+                 resolved_factor = 1
+                 LOG.info(f"InterpolationEngine: Base FPS ({base_fps}) sufficient. Bypassing (factor=1).")
+        
+        if resolved_factor == 1 or len(frames) < 2:
             return [str(f) if isinstance(f, (str, pathlib.Path)) else f for f in frames]
+            
+        factor = resolved_factor
 
         try:
             self._load_model()

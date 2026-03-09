@@ -24,9 +24,9 @@ from unittest.mock import MagicMock, patch
 
 class TestModelAliasResolution:
     def test_sdxl_base_alias_resolves_to_hf_repo(self):
-        """'sdxl-base' resolves to the correct HuggingFace repo id."""
+        """'sdxl-base' resolves to the correct HuggingFace repo id (Juggernaut XL as of Phase 12)."""
         from multigenai.engines.image_engine.engine import MODEL_ALIASES
-        assert MODEL_ALIASES["sdxl-base"] == "stabilityai/stable-diffusion-xl-base-1.0"
+        assert MODEL_ALIASES["sdxl-base"] == "RunDiffusion/Juggernaut-XL-v9"
 
     def test_sdxl_refiner_alias_resolves(self):
         from multigenai.engines.image_engine.engine import MODEL_ALIASES
@@ -45,7 +45,8 @@ class TestModelAliasResolution:
         engine = ImageEngine.__new__(ImageEngine)
         resolved = engine._resolve_model_name("sdxl-base")
         assert resolved != "sdxl-base"
-        assert "stabilityai" in resolved
+        # Phase 12 uses Juggernaut XL (RunDiffusion) or standard SDXL (stabilityai)
+        assert ("stabilityai" in resolved.lower() or "rundiffusion" in resolved.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +285,7 @@ class TestFFmpegCommunicateContract:
         """
         import inspect
         from multigenai.engines.video_engine.engine import VideoEngine
-        source = inspect.getsource(VideoEngine._encode_video)
+        source = inspect.getsource(VideoEngine.encode)
 
         assert "stdin.close()" in source, "must close stdin to signal EOF"
         assert "process.wait()" in source, "must call wait() to let ffmpeg finish"

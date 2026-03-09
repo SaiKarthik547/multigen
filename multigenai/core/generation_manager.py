@@ -161,16 +161,15 @@ class GenerationManager:
         from multigenai.creative.prompt_compiler import PromptCompiler
         from multigenai.core.model_lifecycle import ModelLifecycle
         from multigenai.core.temporal_state import TemporalState
-        from multigenai.engines.motion_engine.motion_estimator import MotionEstimator
         from multigenai.engines.transition_engine.engine import TransitionEngine
         from PIL import Image
 
         # --- Phase 9: process prompt ---
-        processor = self._build_processor(model_name="svd-xt")
+        processor = self._build_processor(model_name="animatediff")
         plan = processor.process(
             prompt=request.prompt,
             negative_prompt=getattr(request, "negative_prompt", ""),
-            model_name="svd-xt",
+            model_name="animatediff",
         )
 
         seg_dir = self._segmented_dir(plan.run_id) if plan.is_multi_segment else None
@@ -261,68 +260,44 @@ class GenerationManager:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        LOG.info("GenerationManager: Booting isolated VideoEngine (SVD-XT) per scene...")
+        LOG.info("GenerationManager: Booting isolated VideoEngine (AnimateDiff) per scene...")
         from multigenai.engines.video_engine.engine import VideoEngine
         
         original_unload = self._ctx.behaviour.auto_unload_after_gen
         self._ctx.behaviour.auto_unload_after_gen = False
         
-        self.motion_estimator = None
+        # FRESH BOOT once for all scenes to eliminate reload overhead
+        video_engine = VideoEngine(self._ctx)
         
-        # Phase 11: Temporal State Tracking
+        # Phase 11+: Temporal State Tracking
         temporal_state = TemporalState()
         
         # Tuple of (segment, frames, out_path, seed)
         seg_frames = []
         try:
             for seg, c_path in zip(plan.segments, conditioning_paths):
-                # FRESH BOOT per scene to prevent cumulative VRAM fragmentation
-                video_engine = VideoEngine(self._ctx)
-                
                 scene_state = self._ctx.scene_memory.get()
                 
-                # Enrich segment prompt with remembered environment
+                # Enrich segment prompt with remembered environment (Phase 12: skip if already present)
                 seg_prompt = seg.positive
-                if scene_state.environment_prompt:
+                if scene_state.environment_prompt and scene_state.environment_prompt not in seg_prompt:
                     seg_prompt += ", " + scene_state.environment_prompt
                     
                 seg_request = request.model_copy(update={"prompt": seg_prompt})
                 
-                # Phase 11: Motion-guided warping (Lazy Load RAFT only if continuity exists)
-                if temporal_state.previous_frame is not None:
-                    if self.motion_estimator is None:
-                        LOG.info("GenerationManager: Booting RAFT (MotionEstimator) for temporal continuity...")
-                        self.motion_estimator = MotionEstimator(device=self._ctx.device)
-
-                    LOG.info(f"GenerationManager: Estimating motion for scene continuity...")
-                    with Image.open(c_path) as img:
-                        init_image = img.convert("RGB")
-                    flow = self.motion_estimator.estimate(temporal_state.previous_frame, init_image)
-                    if flow is not None:
-                        warped_c = self.motion_estimator.warp_frame(temporal_state.previous_frame, flow)
-                        # Save warped conditioning image
-                        warp_path = str(pathlib.Path(c_path).with_name(f"warp_{pathlib.Path(c_path).name}"))
-                        warped_c.save(warp_path)
-                        c_path = warp_path
-                
-                # generate_frames now returns already-truncated latent anchors [B, 1, C, H, W]
-                # frames is now a List[str] (paths to PNGs)
-                frames, final_latent_anchor, out_path, seed = video_engine.generate_frames(
+                # generate_frames now returns paths to frames
+                frames, _, out_path, seed = video_engine.generate_frames(
                     seg_request, 
                     c_path,
-                    previous_latent=temporal_state.previous_latent,
+                    previous_latent=None,
                     scene_index=temporal_state.scene_index
                 )
                 seg_frames.append((seg, frames, out_path, seed))
                 
-                # Phase 11: Update Temporal State
+                # Phase 11/12: Update Temporal State (Simple index and frame capture)
                 if frames:
-                    # Load the last frame path into a PIL image for MotionEstimator
                     from PIL import Image
                     temporal_state.previous_frame = Image.open(frames[-1]).convert("RGB")
-                    
-                    # FIX 10: Store already-truncated anchor
-                    temporal_state.previous_latent = final_latent_anchor
                     temporal_state.scene_index += 1
                     
                     # Push the last generated keyframe into SceneMemory
@@ -331,20 +306,28 @@ class GenerationManager:
                         temporal_state=copy.deepcopy(temporal_state)
                     )
 
-                # Segment-level VRAM hardening: Destroy engine and clear cache
-                del video_engine
+                # Segment-level cleanup (Proactive)
                 import gc
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                    torch.cuda.ipc_collect()
+            
+            # FINAL destruction of engine after all segments are processed
+            video_engine._unload_model()
+            video_engine = None
+            
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
         except Exception as exc:
             LOG.error(f"GenerationManager: Video generation failed: {exc}", exc_info=True)
             return self._video_fail(request, str(exc))
         finally:
             self._ctx.behaviour.auto_unload_after_gen = original_unload
-            if self.motion_estimator:
-                self.motion_estimator.unload()
+            if video_engine:
+                 video_engine._unload_model()
             
             import gc
             gc.collect()
@@ -370,7 +353,8 @@ class GenerationManager:
                 LOG.info("GenerationManager: Merging segments and blending boundaries...")
                 global_frame_paths = []
                 
-                blend_window = 4
+                # Phase 12 Fix: Blend window must match VideoEngine overlap (8 frames)
+                blend_window = 8
                 from PIL import Image
                 
                 for i in range(len(seg_frames)):

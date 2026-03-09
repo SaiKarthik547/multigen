@@ -200,6 +200,8 @@ class PromptAnalyzer:
 
         Heuristic: the first noun-like phrase (up to 5 words) before the
         first verb or preposition is used as the subject string.
+        
+        Phase 12 Constraint: Max 2 unique subjects; primary remains constant.
         """
         subjects = []
         # Simple noun-phrase heuristic — no NLTK dependency required
@@ -208,13 +210,28 @@ class PromptAnalyzer:
             r'during|where|who|that|which|while|beneath|under|over)\b',
             re.IGNORECASE
         )
-        for block in blocks:
+        
+        primary_subject = None
+        
+        for i, block in enumerate(blocks):
             sentence = block.split(".")[0].strip()
             parts = _SPLIT_RE.split(sentence, maxsplit=1)
             candidate = parts[0].strip()
             # Keep only first 5 words
             words = candidate.split()[:5]
             subject = " ".join(words).strip(" ,")
+            
             if subject:
-                subjects.append(subject)
+                if i == 0:
+                    primary_subject = subject
+                    subjects.append(subject)
+                else:
+                    # Enforce primary subject constant (Phase 12)
+                    if subject not in subjects and len(subjects) < 2:
+                        subjects.append(subject)
+                    
+        # Ensure we return at least the primary subject for all blocks if missing
+        if not subjects and primary_subject:
+            subjects.append(primary_subject)
+            
         return subjects

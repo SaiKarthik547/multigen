@@ -61,6 +61,7 @@ class PromptSegmenter:
 
         Returns:
             List of non-empty segmented prompts, each ≤ positive_budget tokens.
+            Phase 12: Capped at 3 segments for 3 scenes x 24 frames strategy.
         """
         positive_budget = self._mgr.budget.positive_budget
         segments: List[str] = []
@@ -68,7 +69,10 @@ class PromptSegmenter:
         if not structure.narrative_blocks:
             return []
 
-        for block in structure.narrative_blocks:
+        # Phase 12: Limit to 3 narrative blocks max
+        blocks = structure.narrative_blocks[:3]
+
+        for block in blocks:
             block = block.strip()
             if not block:
                 continue
@@ -94,10 +98,11 @@ class PromptSegmenter:
                     f"({self._mgr.count_tokens(seg)} tokens > {positive_budget} budget)."
                 )
 
-        final = [s.strip() for s in verified if s.strip()]
+        # Phase 12: Hard cap after all splitting and safety passes
+        final = [s.strip() for s in verified if s.strip()][:3]
         LOG.info(
             f"PromptSegmenter: {len(structure.narrative_blocks)} blocks → "
-            f"{len(final)} segment(s) "
+            f"{len(final)} segment(s) (Capped at 3 per Phase 12) "
             f"(budget={positive_budget} tokens/segment)"
         )
         return final
@@ -113,12 +118,12 @@ class PromptSegmenter:
             text: Raw prompt string.
 
         Returns:
-            List of budget-safe segments.
+            List of budget-safe segments (capped at 3 per Phase 12).
         """
         positive_budget = self._mgr.budget.positive_budget
         if self._mgr.count_tokens(text) <= positive_budget:
             return [text.strip()]
-        return self._split_block(text.strip(), positive_budget)
+        return self._split_block(text.strip(), positive_budget)[:3]
 
     # ------------------------------------------------------------------
     # Internal helpers

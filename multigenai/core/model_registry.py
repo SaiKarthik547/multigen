@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import threading
 import time
+import yaml
+import pathlib
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 from multigenai.core.exceptions import InsufficientVRAMError, ModelLoadError, ModelNotFoundError
 from multigenai.core.logging.logger import get_logger
@@ -59,6 +61,24 @@ class ModelRegistry:
     def __init__(self) -> None:
         self._models: Dict[str, ModelEntry] = {}
         self._model_lock = threading.Lock()
+        self._config: Dict[str, Any] = self._load_model_config()
+
+    def _load_model_config(self) -> Dict[str, Any]:
+        """Loads model_config.yaml from core/config/."""
+        config_path = pathlib.Path(__file__).parent / "config" / "model_config.yaml"
+        if not config_path.exists():
+            LOG.warning(f"ModelRegistry: Config not found at {config_path}. Using hardcoded defaults.")
+            return {}
+        try:
+            with open(config_path, "r") as f:
+                return yaml.safe_load(f)
+        except Exception as e:
+            LOG.error(f"ModelRegistry: Failed to load config: {e}")
+            return {}
+
+    def get_config_value(self, key: str, default: Any = None) -> Any:
+        """Helper to get dynamic model IDs from YAML."""
+        return self._config.get(key, default)
 
     # ------------------------------------------------------------------
     # Singleton accessor
