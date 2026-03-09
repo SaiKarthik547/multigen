@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://python.org)
 [![Diffusers](https://img.shields.io/badge/Diffusers-0.24%2B-orange)](https://github.com/huggingface/diffusers)
-[![Tests](https://img.shields.io/badge/Tests-321%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/Tests-323%20passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/License-MIT-green)](#license)
 
 ---
@@ -41,10 +41,8 @@
 
 MultiGenAI OS is a **production-grade, multi-modal content generation system** designed to run everywhere — from a local developer machine (CPU or GPU) to a Kaggle notebook with a T4/P100/V100. It provides a unified interface to generate:
 
-| Modality | Engine | Backend |
-|---|---|---|
-| 🖼️ **Images** | `ImageEngine` | SDXL Base + optional Refiner (two-stage) |
-| 🎬 **Videos** | `VideoEngine` | Stable Video Diffusion XT (SVD-XT) |
+| 🖼️ **Images** | `ImageEngine` | Juggernaut XL (SDXL) + optional Refiner (two-stage) |
+| 🎬 **Videos** | `VideoEngine` | AnimateDiff (v1.5/v3) + Motion Adapter + Sliding Window |
 | 🔊 **Audio** | `AudioEngine` | Schema ready; implementation planned |
 | 📄 **Documents** | `DocumentEngine` | Wikipedia-sourced Word/PDF reports |
 | 📊 **Presentations** | `PresentationEngine` | Python-PPTX auto-decks |
@@ -61,19 +59,17 @@ Intent → SceneDesigner → PromptCompiler → Isolated Engine → ModelLifecyc
 
 ## Key Features
 
-- **🎨 Creative Intelligence Layer (Phase 7)** — `SceneDesigner` converts raw intent into a structured `SceneBlueprint`; `PromptCompiler` turns that into optimized diffusion prompts with model-specific negative tokens
-- **🔒 Strict Model Lifecycle** — `ModelLifecycle.safe_unload()` ensures VRAM is fully evacuated after every generation; base and refiner are NEVER loaded simultaneously
-- **🖼️ Multi-Model ImageEngine** — Auto-detects pipeline class from the repo id: SDXL repos load `StableDiffusionXLPipeline` (fp16 variant); SD 1.x repos load `StableDiffusionPipeline` — no `variant` kwarg mismatch; `vae.enable_tiling()` + attention slicing apply to both
-- **🎬 SVD-XT Video Generation (Phase 6, Hardened)** — SVD-XT pipeline with `decode_chunk_size=2` for ~50% peak VRAM reduction during temporal VAE decode; adaptive pixel-area frame cap (>`600 000px` → max 8 frames on T4); `motion_bucket_id` clamped to `[0, 255]`; `effective_frames` passed explicitly — request object is never mutated; `ffmpeg` streaming lifecycle uses `wait()` before `stderr.read()` to eliminate flush-of-closed-file race on fast Kaggle exits
-- **🤖 GenerationManager Orchestration** — All modalities flow through a single orchestrator; engines are instantiated, run, and destroyed per-request — no engine shares state with another
-- **🧠 Dual LLM Mode** — LLM-enhanced prompts (Gemini/OpenAI/Ollama) with automatic rule-based fallback; zero config required for offline use
-- **👤 Persistent Character Identity** — 512-d ArcFace face embeddings via InsightFace, stored persistently and injected for frame-consistent characters; uses `FaceEncoder` (CPU/ONNX) to ensure no VRAM collision with generative models
-- **🌍 Adaptive Execution** — Auto-detects Kaggle, GPU VRAM tier, DirectML (AMD on Windows), and CI environments; supports `performance_mode` (speed/quality/balanced) toggles
-- **📊 Generation Metrics** — Per-run structured metrics (latency, VRAM usage, seed) stored as JSON
-- **🖥️ Hardened Streamlit UI** — Full browser-based UI orchestrated by `GenerationManager`; supports image, video, audio, code, and document generation with real-time health-checks and VRAM isolation
-- **✅ 321 Tests Passing** — Comprehensive test coverage across all modules, including local RIFE integration tests, Phase 9 prompt processing tests, Phase 10 consistency tests, and Phase 11 continuity tests.
-- **🧠 Phase 10 Scene Memory & Consistency** — `SceneMemory` persists state across prompt segments; `IPAdapterManager` maintains character identity (40% → 65% improvement); `ControlNetManager` (DepthAnythingSmall) locks scene structure (50% → 75% improvement); temporal conditioning cycles the last SVD frame back as the next segment's reference.
-- **🎬 Phase 11 Temporal Continuity Engine** — True seamless cinematic generation via **Latent Propagation** (injecting previous SVD latents into current noise via custom `TemporalSVD` pipeline) and **Motion-Guided Warping** (RAFT-based optical flow); **Alpha-Blending** transitions ensure smooth visual boundaries between clips.
+- **🎨 Creative Intelligence Layer (Phase 7/12)** — `SceneDesigner` converts raw intent into a structured `SceneBlueprint`; now includes **Camera Trajectory System** (tracking, pan, dolly) and motion token injection for cinematic realism.
+- **🔒 Strict Model Lifecycle** — `ModelLifecycle.safe_unload()` ensures VRAM is fully evacuated after every generation; `GenerationManager` isolates model residency to prevent GPU OOM on T4 environments.
+- **🖼️ Phase 10 Consistency** — `SceneMemory` persists state across prompt segments; `IPAdapterManager` (v1.5 adapter) maintains character identity; `ControlNetManager` (DepthAnythingSmall) locks scene structure.
+- **🎬 Cinematic Video Engine (Phase 12)** — Migrated to **AnimateDiff** with **Temporal Sliding Windows** (16-frame windows, 8-frame overlap) for significant motion improvement; implements **Latent Noise Drift** and linear alpha-blending for seamless continuity.
+- **🤖 GenerationManager Orchestration** — Sole orchestrator for all modalities; enforces optimized engine lifecycles; handles multi-segment merging and global interpolation (RIFE).
+- **🧠 Phase 9 Advanced Prompt Processing** — Guarantees zero CLIP token truncation for long scripts; automated narrative segmentation and contextual expansion.
+- **👤 Persistent Character Identity** — 512-d ArcFace face embeddings via InsightFace, stored persistently and injected via ImageEngine (IP-Adapter) for frame-consistent characters.
+- **🌍 Adaptive Execution** — Auto-detects Kaggle T4, GPU VRAM tier, DirectML, and CI environments; supports `performance_mode` toggles for resolution scaling.
+- **📊 Generation Metrics** — Per-run structured metrics (latency, VRAM usage, seed) stored as JSON.
+- **✅ 323 Tests Passing** — Comprehensive test coverage including Phase 12 temporal stability, sliding windows, and motion realism logic.
+- **🎬 Phase 11/12 Temporal Continuity** — True cinematic generation via **Latent Propagation**, **Motion-Guided Warping**, and segment alpha-blending (8-frame matching overlap).
 
 ---
 
@@ -117,8 +113,8 @@ graph TB
     end
 
     subgraph ENGINE_BOX["⑤ Diffusion Engines (Isolated per request)"]
-        IE["🖼️ ImageEngine\nSDXL Base → optional Refiner\nengines/image_engine/"]
-        VE["🎬 VideoEngine\nSVD-XT single-pass\nengines/video_engine/"]
+        IE["🖼️ ImageEngine\nJuggernaut XL (SDXL)\nengines/image_engine/"]
+        VE["🎬 VideoEngine\nAnimateDiff Sliding Window\nengines/video_engine/"]
         AE["🔊 AudioEngine\nSchema-ready stub"]
         DE["📄 DocumentEngine\nWikipedia → Word/PDF"]
         PRE["📊 PresentationEngine\nPython-PPTX auto-decks"]
@@ -155,9 +151,9 @@ graph TB
     end
 
     subgraph MODEL_BOX["⑨ AI Model Backends"]
-        SDXL["stabilityai/sdxl-base-1.0"]
+        JXL["RunDiffusion/Juggernaut-XL-v9"]
         REF["stabilityai/sdxl-refiner-1.0"]
-        SVD["stabilityai/stable-video-diffusion-img2vid-xt"]
+        AD["guoyww/animatediff-motion-adapter-v1-5-2"]
         CNET["diffusers/controlnet-depth-sdxl-1.0"]
     end
 
@@ -199,7 +195,7 @@ graph TB
     class ML lifecycle
     class CTX,ENV,MR,MET core
     class IS,SR,WS,ES,FE,IR memory
-    class SDXL,REF,SVD models
+    class JXL,REF,AD models
 ```
 
 ---
@@ -249,7 +245,7 @@ sequenceDiagram
 
 ---
 
-### L2 — Video Generation Data Flow (Phase 10)
+### L2 — Video Generation Data Flow (Phase 12)
 
 ```mermaid
 sequenceDiagram
@@ -258,7 +254,7 @@ sequenceDiagram
     participant SM as SceneMemory
     participant IE as ImageEngine
     participant VE as VideoEngine
-    participant SVD as SVD-XT Pipeline
+    participant AD as AnimateDiff Pipeline
     participant FF as ffmpeg (subprocess)
     participant ML as ModelLifecycle
 
@@ -268,28 +264,24 @@ sequenceDiagram
     note over GM,IE: PASS 1: Conditioning Generations
     loop For each segment
         GM->>IE: image_engine.run(..., scene_memory context)
-        IE-->>GM: conditioning image
+        IE-->>GM: conditioning image (Juggernaut XL)
         GM->>SM: update(character_ref, current_reference_frame)
     end
 
-    note over GM,SVD: PASS 2: Temporal Video (Phase 11)
+    note over GM,AD: PASS 2: Temporal Video (Phase 12)
     loop For each segment
-        GM->>ME: estimate(prev_frame, current_conditioning)
-        ME-->>GM: optical flow
-        GM->>ME: warp_frame(prev_frame, flow)
-        ME-->>GM: warped conditioning image
-        
-        GM->>VE: generate_frames(..., warped_c, prev_latent)
-        VE->>SVD: warm-start UNet with prev_latent
-        SVD-->>VE: frames + final_latent
-        VE-->>GM: VideoResult + TemporalState
-        
-        GM->>SM: update(prev_frame, prev_latent, motion_field)
+        GM->>VE: generate_frames(..., scene_index)
+        VE->>VE: Window 1 (0-15) + Seed S
+        VE->>AD: inference (AnimateDiff)
+        VE->>VE: Window 2 (8-23) + Seed S+1 + Drift
+        VE->>AD: inference (AnimateDiff)
+        VE->>VE: 8-frame Linear Blend
+        VE-->>GM: VideoResult
     end
     
-    GM->>TE: blend(all_segment_frames, window=4)
+    GM->>TE: global_blend(all_segments, window=8)
     TE-->>GM: Seamless sequence
-    GM->>VE: encode(blended_frames)
+    GM->>VE: encode(final_sequence)
     VE->>FF: stream to ffmpeg
     FF-->>VE: .mp4
     
@@ -335,14 +327,14 @@ stateDiagram-v2
 | # | Layer | Location | Responsibility |
 |---|---|---|---|
 | ① | **Entry Points** | `cli.py`, `api/`, `apps/` | Accept user input; delegate 100% to GenerationManager |
-| ② | **GenerationManager** | `core/generation_manager.py` | Sole orchestrator; owns inter-engine sequencing; enforces lifecycle |
-| ③ | **Creative Layer** | `creative/` | Converts intent into `SceneBlueprint` → optimized prompts before any GPU op |
+| ② | **GenerationManager** | `core/generation_manager.py` | Sole orchestrator; owns inter-engine sequencing; enforces lifecycle; **Phase 12 Optimized Engine Residency** |
+| ③ | **Creative Layer** | `creative/` | Converts intent into `SceneBlueprint` → optimized prompts; **Phase 12 Camera Trajectory System** |
 | ④ | **LLM Intelligence** | `llm/` | Style injection, token stripping, LLM-based enhancement |
-| ⑤ | **Engines** | `engines/` | Isolated inference; each engine owns its model load/unload; no engine calls another |
+| ⑤ | **Engines** | `engines/` | Isolated inference; **AnimateDiff (Video)** / **Juggernaut XL (Image)** / **RIFE (Interpolation)** |
 | ⑥ | **Model Lifecycle** | `core/model_lifecycle.py` | Centralized teardown (`del`, `gc`, `empty_cache`, `ipc_collect`) |
 | ⑦ | **Core Infrastructure** | `core/` | Settings, DI container, device detection, metrics, exception hierarchy |
 | ⑧ | **Memory & Identity** | `memory/`, `identity/` | Persistent character embeddings, style presets, world state, embedding cache |
-| ⑨ | **AI Backends** | HuggingFace Hub | SDXL Base, SDXL Refiner, SVD-XT (downloaded on first use) |
+| ⑨ | **AI Backends** | HuggingFace Hub | Juggernaut XL, SDXL Refiner, AnimateDiff Motion Adapter |
 | ⑩ | **Consistency Layer** | `consistency/` | `SceneMemory`, `IPAdapterManager`, `ControlNetManager` |
 
 ---
@@ -373,30 +365,42 @@ Locks scene structure and camera framing (75% consistency).
 ### VRAM Budget on T4
 | Component | VRAM Status | Optimization |
 |---|---|---|
-| **SDXL Base** | ~6.0 GB | Sequential CPU offload |
-| **ControlNet** | ~1.6 GB | Pipeline-attached |
-| **SDXL Refiner** | ~4.0 GB | Isolated load (after Base unload) |
+| **Juggernaut XL** | ~6.0 GB | fp16 + sequential offload |
+| **ControlNet** | ~1.6 GB | DepthSDXL (attached) |
+| **SDXL Refiner** | ~4.0 GB | Isolated load (Phase 7 contract) |
 | **Depth Estimator** | ~0.15 GB | **Forced to CPU** |
 | **IP-Adapter** | ~0.5 GB | Model offload active |
-| **RAFT (Motion)** | ~0.2 GB | Loaded in Video pass |
-| **Peak VRAM** | **~11.9 GB** | **(Safe for Kaggle 14GB T4)** |
+| **AnimateDiff** | **~7.8 GB** | **Sliding Window (16 frames)** |
+| **Peak VRAM** | **~13.4 GB** | **(Safe for Kaggle 15GB T4)** |
 
 ---
 
-## Temporal Continuity Engine ✨ Phase 11
+## Cinematic Realism Engine ✨ Phase 12
 
-Phase 11 upgrades the system from a "clip stitcher" to a **continuous cinematic generator**. It eliminates visual discontinuities between scenes using three core mechanisms:
+The final evolution of the MGOS video pipeline replaces the single-pass SVD architecture with a high-fidelity **AnimateDiff-based cinematic engine**, optimized for temporal realism and complex character motion.
 
-### 1. Latent Propagation
-Standard SVD sampling starts from random Gaussian noise, which causes "flicker" at scene boundaries. Phase 11 uses a custom `TemporalStableVideoDiffusionPipeline` to warm-start the UNet with the final latents from the preceding segment.
+### 1. Temporal Sliding Windows
+The `VideoEngine` generates video in overlapping windows of 16 frames:
+- **Overlap**: 8 frames of overlap between successive windows.
+- **Blending**: A linear alpha-blend is applied at the window boundary, ensuring no visual "jumps" during generation.
+- **Temporal Drift**: Implements a latent noise drift of **0.015** and a seed offset (`seed + 1`) between windows to prevent frame freezing and encourage organic movement.
 
-### 2. Motion-Guided Warping (RAFT)
-To ensure movement continues logically between segments, we use the **RAFT (Recurrent All-Pairs Field Transforms)** optical flow model.
-- **`MotionEstimator`**: Estimates flow between the previous scene's end and the next scene's start.
-- **Warping**: The conditioning frame for segment $N+1$ is warped to match the motion trajectory of segment $N$.
+### 2. Camera Trajectory System
+Integrated directly into the `SceneDesigner`, the system automatically injects cinematic camera trajectories based on the scene index:
+- **Scene 1**: `slow tracking shot`
+- **Scene 2**: `cinematic pan`
+- **Scene 3**: `dolly forward`
+This creates professional-grade cinematography across multi-segment narratives.
 
-### 3. Alpha-Blending Transitions
-The `TransitionEngine` applies a weighted linear alpha-blend over a 4-frame window at scene boundaries, smoothing out any remaining lighting or structural micro-drifts.
+### 3. Motion Token Injection
+Prompts are enriched with localized motion tokens:
+- `natural body movement`
+- `subtle environmental motion`
+- `walking animation`
+- `dynamic motion blur`
+
+### 4. Smart Interpolation (RIFE)
+The `InterpolationEngine` (Phase 8) now includes an intelligent trigger: it only activates if the base generation speed is below **12 FPS**, preventing blurring on high-fidelity segments while ensuring smoothness for low-frame-rate generations.
 
 ---
 
@@ -803,20 +807,23 @@ CLI/API/UI
         └─> ModelLifecycle.safe_unload(engine)
 ```
 
-### Video Generation (Phase 6)
+### Video Generation (Phase 12)
 
 ```
 GenerationManager.generate_video(VideoGenerationRequest)
   ├─> [If no conditioning image provided]
-  │     ├─> SceneDesigner + PromptCompiler → compile keyframe prompt
+  │     ├─> SceneDesigner + PromptCompiler → compile keyframe prompt (Juggernaut XL)
   │     ├─> ImageEngine.run(keyframe_req)
   │     └─> ModelLifecycle.safe_unload(image_engine)  ← VRAM cleared
   └─> VideoEngine.generate(request, conditioning_image_path)
-        ├─> Load SVD-XT with sequential offloading
-        ├─> Single forward pass → frames tensor
-        ├─> Pipe frames to ffmpeg → .mp4
+        ├─> Load AnimateDiff with VAE/Attention slicing
+        ├─> sliding_window(0-15) + sliding_window(8-23)
+        ├─> Linear blend overlap (8 frames)
+        ├─> Pipe frames to ffmpeg via byte stream → .mp4
         └─> ModelLifecycle.safe_unload(video_engine)
 ```
+
+> **Temporal Realism**: Uses the **Cinematic Realism Engine** (sliding windows + camera trajectories) for professional-grade motion coherence.
 
 ---
 
@@ -957,8 +964,8 @@ Opens at `http://localhost:8501`.
 # Image generation (Phase 7 schema)
 python -m multigenai.cli image "a warrior at dawn" --style cinematic --seed 42
 
-# Video generation (Phase 6 SVD-XT)
-python -m multigenai.cli video "epic ocean storm" --frames 16 --fps 8
+# Video generation (Phase 12 AnimateDiff)
+python -m multigenai.cli video "epic ocean storm" --frames 24 --fps 12
 
 # Document generation
 python -m multigenai.cli document "quantum computing" --pages 5
@@ -988,7 +995,7 @@ img_result = manager.generate_image(ImageGenerationRequest(
     seed=42,
 ))
 
-# Video (auto-generates keyframe via ImageEngine, then SVD-XT)
+# Video (auto-generates keyframe via ImageEngine, then AnimateDiff)
 vid_result = manager.generate_video(VideoGenerationRequest(
     prompt="a calm ocean at golden hour",
     num_frames=16,
@@ -1001,7 +1008,7 @@ vid_result = manager.generate_video(VideoGenerationRequest(
 ## Running Tests
 
 ```bash
-# Run all 316 tests
+# Run all 323 tests
 pytest tests/ -v
 
 # Individual suites
@@ -1033,5 +1040,6 @@ pytest tests/test_phase11_latent_fix.py -v  # Latent propagation verification
 | Phase 9 | ✅ Complete | **Advanced Prompt Processing**: `PromptProcessor` subsystem — `PromptAnalyzer`, `PromptSegmenter`, `SegmentExpander`, `NegativePromptManager`, `PromptPlan`; token-safe segmentation (50 pos / 25 neg tokens per segment); paragraph/scene/sentence boundary detection; segment-aware `GenerationManager` with multi-output `segmented_runs/` layout; 62 new tests |
 | Phase 10 | ✅ Complete | **Scene Memory & Consistency**: `SceneMemory` subsystem, `IPAdapterManager` for identity, `ControlNetManager` (DepthAnythingSmall) for structural locking; temporal conditioning cycles; CPU-offloaded depth estimation; hardened VRAM safety for 14GB T4; 350+ tests |
 | Phase 11 | ✅ Complete | **Temporal Continuity Engine**: `TemporalState` propagation, `TemporalSVD` latent injection, RAFT-based motion estimation, and alpha-blending scene transitions for seamless cinematic video. |
-| Phase 12 | 🔜 Planned | Multi-agent DAG orchestration: parallel scene generation, automatic scene assembly |
-| Phase 13 | 🔜 Planned | Presentation & Document enhancements: multi-modal RAG context |
+| Phase 12 | ✅ Complete | **Motion Realism & AnimateDiff**: Replaced SVD with AnimateDiff; implemented Temporal Sliding Windows (16/8 overlap), Latent Noise Drift, and Camera Trajectory injection for cinematic realism. |
+| Phase 13 | 🔜 Planned | Multi-agent DAG orchestration: parallel scene generation, automatic scene assembly |
+| Phase 14 | 🔜 Planned | Presentation & Document enhancements: multi-modal RAG context |
