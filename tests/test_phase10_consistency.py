@@ -8,8 +8,8 @@ def test_scene_memory_initialization():
     
     # Assert fresh initialization
     assert isinstance(state, SceneState)
-    assert state.character_reference is None
-    assert state.reference_frame is None
+    assert state.character_reference_path is None
+    assert state.reference_frame_path is None
     assert state.environment_prompt is None
     assert state.lighting_prompt is None
     assert state.style_prompt is None
@@ -17,19 +17,19 @@ def test_scene_memory_initialization():
 def test_scene_memory_update_only_valid_fields():
     mem = SceneMemory()
     
-    # Create dummy image
-    img = Image.new('RGB', (100, 100))
+    # Asset path
+    path = "/fake/img.png"
     
     # Assert successful field updates
     mem.update(
-        character_reference=img,
+        character_reference_path=path,
         environment_prompt="A dark spooky forest",
         lighting_prompt="cinematic dramatic lighting"
     )
     
     state = mem.get()
-    assert state.character_reference is img
-    assert state.reference_frame is None
+    assert state.character_reference_path == path
+    assert state.reference_frame_path is None
     assert state.environment_prompt == "A dark spooky forest"
     assert state.lighting_prompt == "cinematic dramatic lighting"
 
@@ -39,12 +39,12 @@ def test_scene_memory_update_only_valid_fields():
 
 def test_scene_memory_reset():
     mem = SceneMemory()
-    img = Image.new('RGB', (100, 100))
-    mem.update(reference_frame=img, style_prompt="cyberpunk")
+    path = "/fake/img.png"
+    mem.update(reference_frame_path=path, style_prompt="cyberpunk")
     
     assert mem.get().style_prompt == "cyberpunk"
     
     mem.reset()
     state = mem.get()
     assert state.style_prompt is None
-    assert state.reference_frame is None
+    assert state.reference_frame_path is None

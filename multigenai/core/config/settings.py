@@ -123,6 +123,17 @@ class PromptSettings:
         return self.max_tokens - self.negative_reserve
 
 
+@dataclass
+class VideoSettings:
+    """
+    Configuration for the Video Generation Engine (Phase 12/ILC).
+
+    All fields overridable via MGOS_VIDEO_<FIELD> environment variables.
+    """
+    enable_ip_adapter: bool = False
+    enable_compile: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Top-level Settings
 # ---------------------------------------------------------------------------
@@ -142,6 +153,7 @@ class Settings:
     llm: LLMSettings = field(default_factory=LLMSettings)
     sdxl: SDXLSettings = field(default_factory=SDXLSettings)
     prompt: PromptSettings = field(default_factory=PromptSettings)
+    video: VideoSettings = field(default_factory=VideoSettings)
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +219,7 @@ def get_settings(config_path: Optional[pathlib.Path] = None) -> Settings:
     llm_raw = raw.get("llm", {})
     sdxl_raw = raw.get("sdxl", {})
     prompt_raw = raw.get("prompt", {})
+    video_raw = raw.get("video", {})
 
     return Settings(
         mode=_env("mode", raw.get("mode", "dev")),
@@ -312,6 +325,16 @@ def get_settings(config_path: Optional[pathlib.Path] = None) -> Settings:
             expansion=_env_bool(
                 "prompt_expansion",
                 bool(prompt_raw.get("expansion", True)),
+            ),
+        ),
+        video=VideoSettings(
+            enable_ip_adapter=_env_bool(
+                "video_enable_ip_adapter",
+                bool(video_raw.get("enable_ip_adapter", False)),
+            ),
+            enable_compile=_env_bool(
+                "video_enable_compile",
+                bool(video_raw.get("enable_compile", False)),
             ),
         ),
     )

@@ -71,30 +71,30 @@ def _slug(text: str, max_len: int = 40) -> str:
     return slug[:max_len].strip("-")
 
 
-def _apply_memory_optimizations(pipe, device: str) -> None:
+def _apply_memory_optimizations(pipe, device: str, use_ip_adapter: bool = False) -> None:
     """
-    Apply all VRAM-saving optimizations to a diffusers pipeline.
+    Apply unified VRAM-saving optimizations to a diffusers pipeline.
 
-    All three optimizations together give ~70% VRAM reduction vs. naive loading:
-      - sequential_cpu_offload: sends each submodule to GPU only when needed
-      - vae_tiling:             decodes in spatial tiles instead of full-res
-      - attention_slicing:      slices attention heads to reduce peak activation size
-
-    Args:
-        pipe:   Any diffusers pipeline with enable_* methods.
-        device: Active compute device string.
+    - model_cpu_offload:    Offloads submodels to CPU when idle (Standard Phase 13).
+    - vae_slicing/tiling:  Reduces peak VRAM during high-res decoding.
+    - attention_slicing:   Saves VRAM (skipped if IP-Adapter is active to avoid conflicts).
     """
     if device == "cuda":
-        pipe.enable_sequential_cpu_offload()
+        pipe.enable_model_cpu_offload()
+        pipe.vae.enable_slicing()
         pipe.vae.enable_tiling()
-        pipe.enable_attention_slicing()
+        
+        if not use_ip_adapter:
+            pipe.enable_attention_slicing()
+        else:
+            LOG.debug("ImageEngine: Skipping attention slicing (IP-Adapter active).")
+            
     elif device == "directml":
-        # DirectML: no sequential offload, but tiling and slicing help
         pipe.vae.enable_tiling()
         pipe.enable_attention_slicing()
         pipe = pipe.to(device)
     else:
-        # CPU: tiling saves RAM; no CUDA-specific offloading
+        # CPU
         pipe.vae.enable_tiling()
         pipe = pipe.to(device)
     return pipe
@@ -203,21 +203,8 @@ class ImageEngine:
             model_type = "sdxl" if is_xl else "sd15"
             self.ip_adapter_manager.load(self.pipe, model_type=model_type)
 
-        # --- Apply memory optimizations ---
-        if self.device == "cuda":
-            self.pipe.enable_model_cpu_offload()
-        else:
-            self.pipe = self.pipe.to(self.device)
-
-        LOG.info("Apply VAE slicing")
-        self.pipe.vae.enable_slicing()
-        self.pipe.vae.enable_tiling()
-
-        # Attention slicing breaks IP-Adapter processors
-        if not use_ip_adapter:
-            self.pipe.enable_attention_slicing()
-        else:
-            LOG.info("Skip attention slicing")
+        # --- Apply unified memory optimizations ---
+        self.pipe = _apply_memory_optimizations(self.pipe, self.device, use_ip_adapter=use_ip_adapter)
             
         self._controlnet_enabled = use_controlnet
         self._ip_adapter_enabled = use_ip_adapter
@@ -255,7 +242,7 @@ class ImageEngine:
             "height": request.height,
             "generator": generator,
             "num_inference_steps": request.num_inference_steps,
-            "guidance_scale": 6.5,
+            "guidance_scale": request.guidance_scale,
             "output_type": "latent" if request.use_refiner else "pil",
         }
 
@@ -312,19 +299,16 @@ class ImageEngine:
             )
             self.refiner = _apply_memory_optimizations(self.refiner, self.device)
 
-        LOG.info(f"Refining image (20 steps, strength=0.15)...")
-        
-        # Stability fix: Do NOT manually move VAE to float32 if pipeline is float16.
-        # This prevents the "Input type (Half) and bias type (float) should be the same" crash.
-        # We rely on Diffusers to handle precision, or keep it in fp16 for T4 speed.
+        LOG.info(f"Refining image ({request.refiner_num_inference_steps} steps, strength={request.refiner_strength})...")
         
         refined = self.refiner(
             prompt=compiled_prompt,
             negative_prompt=negative_prompt,
             image=image,
-            generator=generator,           # same CPU generator — ensures determinism
-            num_inference_steps=20,
-            strength=0.15,
+            generator=generator,
+            num_inference_steps=request.refiner_num_inference_steps,
+            strength=request.refiner_strength,
+            guidance_scale=request.guidance_scale,
         )
 
         # Immediate teardown if required — otherwise keep alive for next segment
@@ -392,9 +376,15 @@ class ImageEngine:
             image.save(out_path)
             LOG.info(f"Image saved to {out_path}")
 
+        except RuntimeError as exc:
+            if "out of memory" in str(exc).lower() or "oom" in str(exc).lower():
+                LOG.error(f"Image generation failed (CUDA Out of Memory): {exc}")
+                return ImageResult(str(out_path), request.width, request.height, seed, False, str(exc))
+            LOG.error(f"Image generation failed with RuntimeError: {exc}", exc_info=True)
+            raise
         except Exception as exc:
-            LOG.error(f"Image generation failed: {exc}", exc_info=True)
-            return ImageResult(str(out_path), request.width, request.height, seed, False, str(exc))
+            LOG.error(f"Image generation failed with unpredictable error: {exc}", exc_info=True)
+            raise
 
         finally:
             if self._ctx.behaviour.auto_unload_after_gen:

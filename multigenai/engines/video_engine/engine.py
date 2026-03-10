@@ -96,7 +96,7 @@ class VideoEngine:
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
 
-            if use_ip_adapter:
+            if self._ctx.settings.video.enable_ip_adapter and use_ip_adapter:
                 LOG.info("VideoEngine: Loading IP-Adapter for visual conditioning (SD1.5)...")
                 self.ip_adapter_manager.load(self.pipe, model_type="sd15")
                 # Phase 12 Fix: Increase influence for character stability
@@ -127,7 +127,7 @@ class VideoEngine:
                     LOG.debug("VideoEngine: Xformers not available.")
 
             # Phase 12 Optimized: Compile UNet for speed improvement (Kaggle T4 safe)
-            if hasattr(torch, "compile"):
+            if self._ctx.settings.video.enable_compile and hasattr(torch, "compile"):
                 try:
                     self.pipe.unet = torch.compile(self.pipe.unet, mode="reduce-overhead", fullgraph=False)
                     LOG.info("VideoEngine: UNet compilation enabled (safe mode).")
@@ -163,8 +163,9 @@ class VideoEngine:
         conditioning_image: "PILImage",
         seed: int,
         num_frames: int,
+        temporal_state: "TemporalState",
         scene_index: int = 0
-    ) -> List["PILImage"]:
+    ) -> tuple[List["PILImage"], torch.Tensor]:
         """
         Executes AnimateDiff generation with Temporal Sliding Windowing.
         
@@ -179,7 +180,7 @@ class VideoEngine:
         
         inference_steps = request.num_inference_steps if request.num_inference_steps > 0 else 25
         
-        # Phase 12: Integrated SceneDesigner for trajectory and motion tokens
+        # Phase 13: Integrated SceneDesigner for trajectory and motion tokens
         blueprint = SceneDesigner().design_video(request, scene_index=scene_index)
         motion_prompt, negative_prompt = PromptCompiler().compile(blueprint, "animatediff")
         
@@ -189,20 +190,52 @@ class VideoEngine:
             "negative_prompt": negative_prompt,
             "num_inference_steps": inference_steps,
             "guidance_scale": 6.5,
+            "width": 768,
+            "height": 512,
         }
         
-        # Issue 4 Fix: Always pass IP-Adapter image if available
-        pipe_kwargs["ip_adapter_image"] = conditioning_image
+        if self._ctx.settings.video.enable_ip_adapter:
+            pipe_kwargs["ip_adapter_image"] = conditioning_image
 
-        LOG.info(f"VideoEngine: Generating 2x16 frame windows with 8-frame overlap (Realism Path)...")
+        LOG.info(f"VideoEngine: Generating 2x16 frame windows with 4-frame overlap (Phase 13)...")
         
         device_type = "cuda" if self.device == "cuda" else "cpu"
         with torch.inference_mode(), torch.autocast(device_type):
-            # Window 1 (0-15)
-            pipe_kwargs["num_frames"] = 16
-            pipe_kwargs["generator"] = torch.Generator(device=self.device).manual_seed(seed)
+            from multigenai.temporal.latent_propagator import LatentPropagator
+            propagator = LatentPropagator()
+
+            # Phase 14: Identity-Latent Conditioning Initialization
+            shape = (
+                1, 
+                self.pipe.unet.config.in_channels, 
+                16, 
+                512 // self.pipe.vae_scale_factor, 
+                768 // self.pipe.vae_scale_factor
+            )
+            base_generator = torch.Generator(device=self.device).manual_seed(seed)
             
-            # AnimateDiff init image support (ISSUE 2 Fix: check __call__)
+            if hasattr(temporal_state, "identity_latent") and temporal_state.identity_latent is not None:
+                id_lat = temporal_state.identity_latent.to(self.device, dtype=self.pipe.dtype)
+                id_lat = id_lat.unsqueeze(2).expand(*shape)
+                
+                if temporal_state.previous_latent is None:
+                    latents = id_lat.clone()
+                else:
+                    if scene_index > 0 and scene_index % 3 == 0:
+                        latents = id_lat.clone()
+                    else:
+                        prev_lat = temporal_state.previous_latent.to(self.device, dtype=self.pipe.dtype)
+                        latents = (prev_lat * 0.7) + (id_lat * 0.3)
+                
+                # Structural variance initialization
+                latents = propagator.propagate(latents, drift=0.015, generator=base_generator)
+            else:
+                latents = torch.randn(shape, generator=base_generator, device=self.device, dtype=self.pipe.dtype)
+            
+            # --- WINDOW 1 (0-15) ---
+            pipe_kwargs["num_frames"] = 16
+            pipe_kwargs["latents"] = latents.clone()
+            
             if "image" in self.pipe.__call__.__code__.co_varnames:
                 pipe_kwargs["image"] = conditioning_image
                 pipe_kwargs["strength"] = 0.75
@@ -210,39 +243,40 @@ class VideoEngine:
             res1_raw = self.pipe(**pipe_kwargs).frames
             res1 = res1_raw[0] if isinstance(res1_raw[0], list) else res1_raw
             
-            # Window 2 (8-23)
-            # ISSUE 1 & 3 Fix: ensure temporal continuation + offset noise
-            pipe_kwargs["generator"] = torch.Generator(device=self.device).manual_seed(seed + 1)
+            # --- WINDOW 2 (12-27) - 4 frame overlap ---
+            # Phase 14 Fix: Latent noise drift for continuity
+            latents = propagator.propagate(latents, drift=0.015, generator=base_generator)
+            pipe_kwargs["latents"] = latents.clone()
             
             if "image" in self.pipe.__call__.__code__.co_varnames:
                 pipe_kwargs["image"] = res1[-1]  # Anchor to Window 1 end
-                pipe_kwargs["strength"] = 0.6    # Preserve character but allow motion
+                pipe_kwargs["strength"] = 0.6    # Preserve character, allow motion
             
             res2_raw = self.pipe(**pipe_kwargs).frames
             res2 = res2_raw[0] if isinstance(res2_raw[0], list) else res2_raw
             
-        # Linear Temporal Blending
+        # Linear Temporal Blending (4-frame overlap)
         final_frames = []
-        # 1. First 8 frames from Window 1
-        final_frames.extend(res1[:8])
+        # 1. First 12 frames from Window 1
+        final_frames.extend(res1[:12])
         
-        # 2. Middle 8 frames: Blended
-        for i in range(8):
-            alpha = (i + 1) / 9.0 # Linear ramp
-            blended = Image.blend(res1[8+i], res2[i], alpha)
+        # 2. Middle 4 frames: Blended
+        for i in range(4):
+            alpha = (i + 1) / 5.0 # Linear ramp
+            blended = Image.blend(res1[12+i], res2[i], alpha)
             final_frames.append(blended)
             
-        # 3. Last 8 frames from Window 2
-        final_frames.extend(res2[8:])
+        # 3. Last 12 frames from Window 2
+        final_frames.extend(res2[4:])
         
         LOG.info(f"VideoEngine: Windowing complete. Result length: {len(final_frames)}")
-        return final_frames
+        return final_frames, latents
 
     def generate_frames(
         self,
         request: "VideoGenerationRequest",
         conditioning_image_path: str,
-        previous_latent: Optional[torch.Tensor] = None,
+        temporal_state: "TemporalState",
         scene_index: int = 0
     ) -> tuple[List["PILImage"], Optional[torch.Tensor], pathlib.Path, int]:
         """
@@ -265,17 +299,20 @@ class VideoEngine:
         from PIL import Image as PILImage, ImageOps
         LOG.debug(f"Loading conditioning image (if needed): {conditioning_image_path}")
         init_image = PILImage.open(conditioning_image_path).convert("RGB")
-        # ISSUE 7 Fix: Use ImageOps.fit to preserve aspect ratio
+        # ISSUE 7 Fix: Use ImageOps.fit to preserve aspect ratio (Phase 13: 768x512)
+        request.width = 768
+        request.height = 512
         init_image = ImageOps.fit(init_image, (request.width, request.height), method=PILImage.Resampling.LANCZOS)
 
         self._load_model(use_ip_adapter=(init_image is not None))
 
         try:
-            frames = self._generate_video(
+            frames, final_latents = self._generate_video(
                 request, 
                 init_image, 
                 seed, 
                 effective_frames,
+                temporal_state=temporal_state,
                 scene_index=scene_index
             )
             
@@ -288,7 +325,7 @@ class VideoEngine:
                 f.save(f_path)
                 frame_paths.append(f_path)
 
-            return frame_paths, None, out_path, seed
+            return frame_paths, final_latents, out_path, seed
         finally:
             if self._ctx.behaviour.auto_unload_after_gen:
                 self._unload_model()
@@ -400,7 +437,8 @@ class VideoEngine:
             frames, _, out_path, seed = self.generate_frames(
                 request, 
                 conditioning_image_path,
-                previous_latent=None
+                temporal_state=None,  # Not used in deprecated direct pass
+                scene_index=0
             )
             return self.encode(
                 frames=frames,

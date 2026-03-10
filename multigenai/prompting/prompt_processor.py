@@ -36,6 +36,7 @@ from multigenai.prompting.segment_expander import SegmentExpander
 from multigenai.prompting.negative_prompt_manager import NegativePromptManager
 from multigenai.prompting.token_budget_manager import TokenBudgetManager
 from multigenai.prompting.prompt_plan import PromptPlan
+from multigenai.prompting.semantic_compressor import SemanticCompressor
 
 if TYPE_CHECKING:
     from multigenai.core.config.settings import Settings
@@ -157,9 +158,16 @@ class PromptProcessor:
                 user_negative=negative_prompt,
                 model_name=effective_model,
             )
-            pairs = neg_mgr.pair([prompt.strip()])
+            
+            # Phase 13 Fix: Semantic Compression instead of blind word truncation
+            processed_prompt = prompt.strip()
+            if not self._budget_mgr.fits_positive_budget(processed_prompt):
+                compressor = SemanticCompressor(target_tokens=60)
+                processed_prompt = compressor.compress(processed_prompt)
 
-            # Enforce budget even on fast-path pairs
+            pairs = neg_mgr.pair([processed_prompt])
+
+            # Enforce budget even on fast-path pairs (safety net)
             enforced_pairs = [
                 (self._budget_mgr.trim_positive(p), self._budget_mgr.trim_negative(n))
                 for p, n in pairs
@@ -204,6 +212,11 @@ class PromptProcessor:
         # 5. Finalize: strictly enforce budgets on all segments
         enforced_pairs = []
         for p, n in pairs:
+            # Phase 13 Fix: Semantic Compression for individual segments exceeding budget
+            if not self._budget_mgr.fits_positive_budget(p):
+                compressor = SemanticCompressor(target_tokens=60)
+                p = compressor.compress(p)
+                
             p_trim = self._budget_mgr.trim_positive(p)
             n_trim = self._budget_mgr.trim_negative(n)
             enforced_pairs.append((p_trim, n_trim))

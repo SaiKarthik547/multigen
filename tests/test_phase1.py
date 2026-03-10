@@ -391,11 +391,11 @@ def test_video_request_temporal_strength_range():
         VideoGenerationRequest(prompt="test", temporal_strength=-0.1)
 
 
-def test_latent_propagator_inject_noise_signature():
+def test_latent_propagator_propagate_signature():
     from multigenai.temporal.latent_propagator import LatentPropagator
     lp = LatentPropagator()
-    assert hasattr(lp, "inject_noise")
-    assert callable(lp.inject_noise)
+    assert hasattr(lp, "propagate")
+    assert callable(lp.propagate)
 
 
 
@@ -433,9 +433,9 @@ def test_scene_planner_splits_scenes():
     from multigenai.llm.scene_planner import ScenePlanner
     planner = ScenePlanner()
     script = "A knight walks into the forest. He discovers a glowing sword. A dragon appears."
-    scenes = planner.plan(script)
-    assert len(scenes) == 3
-    assert scenes[0].scene_id == "s01"
+    plan = planner.plan(script)
+    assert len(plan.scenes) == 3
+    assert plan.scenes[0].scene_id == "s01"
 
 
 # ---------------------------------------------------------------------------

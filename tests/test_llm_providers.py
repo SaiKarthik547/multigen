@@ -212,10 +212,10 @@ def test_scene_planner_heuristic_no_provider():
     from multigenai.llm.scene_planner import ScenePlanner
     planner = ScenePlanner()
     script = "A knight rides through a forest. He finds a glowing sword. Dawn breaks."
-    scenes = planner.plan(script)
-    assert len(scenes) == 3
-    assert scenes[0].scene_id == "s01"
-    assert scenes[2].time_of_day == "dawn"
+    plan = planner.plan(script)
+    assert len(plan.scenes) == 3
+    assert plan.scenes[0].scene_id == "s01"
+    assert plan.scenes[2].time_of_day == "dawn"
 
 
 def test_scene_planner_uses_structured_generate():
@@ -236,12 +236,12 @@ def test_scene_planner_uses_structured_generate():
     )
 
     planner = ScenePlanner(provider=mock_provider)
-    scenes = planner.plan("A knight rides through a dark forest.")
+    plan = planner.plan("A knight rides through a dark forest.")
 
     mock_provider.structured_generate.assert_called_once()
-    assert len(scenes) == 1
-    assert scenes[0].time_of_day == "night"
-    assert "knight" in scenes[0].characters
+    assert len(plan.scenes) == 1
+    assert plan.scenes[0].time_of_day == "night"
+    assert "knight" in plan.scenes[0].characters
 
 
 def test_scene_planner_malformed_response_falls_back():
@@ -256,11 +256,11 @@ def test_scene_planner_malformed_response_falls_back():
 
     planner = ScenePlanner(provider=mock_provider)
     script = "A knight rides. He fights a dragon."
-    scenes = planner.plan(script)
+    plan = planner.plan(script)
 
     # Must fall back gracefully — 2 heuristic scenes
-    assert len(scenes) == 2
-    assert "knight" in scenes[0].description.lower()
+    assert len(plan.scenes) == 2
+    assert "knight" in plan.scenes[0].description.lower()
 
 
 # ---------------------------------------------------------------------------

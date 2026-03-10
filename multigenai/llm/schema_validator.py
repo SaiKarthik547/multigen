@@ -54,7 +54,12 @@ class ImageGenerationRequest(BaseModel):
     height: int = Field(default=1024, ge=64, le=4096)
     seed: Optional[int] = 42
     num_inference_steps: int = Field(default=30, ge=10, le=100,
-                                      description="Denoising steps for base (and refiner) pass.")
+                                      description="Denoising steps for base pass.")
+    guidance_scale: float = Field(default=6.5, ge=1.0, le=20.0)
+
+    # Refiner Specifics (Phase 13)
+    refiner_num_inference_steps: int = Field(default=20, ge=5, le=100)
+    refiner_strength: float = Field(default=0.15, ge=0.0, le=1.0)
 
     # --- Phase 4 / 6 backward compatibility ---
     character_id: Optional[str] = None

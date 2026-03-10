@@ -53,6 +53,15 @@ class SceneDescriptor:
     duration_hint: float = 3.0
     notes: str = ""
 
+@dataclass
+class VideoGenerationPlan:
+    """
+    Complete orchestrated plan for a multi-scene video.
+    """
+    scenes: List[SceneDescriptor] = field(default_factory=list)
+    transitions: List[str] = field(default_factory=list)
+    duration_estimate: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas for structured_generate()
@@ -138,9 +147,9 @@ class ScenePlanner:
     # Public API
     # ------------------------------------------------------------------
 
-    def plan(self, script: str, default_duration: float = 3.0) -> List[SceneDescriptor]:
+    def plan(self, script: str, default_duration: float = 3.0) -> VideoGenerationPlan:
         """
-        Parse a script string into a list of SceneDescriptors.
+        Parse a script string into a structured VideoGenerationPlan.
 
         Routes to plan_with_llm() when a provider is set; falls back to
         heuristic splitting on failure.
@@ -150,17 +159,28 @@ class ScenePlanner:
             default_duration: Seconds per scene (hint for video engine).
 
         Returns:
-            Ordered list of SceneDescriptor objects.
+            VideoGenerationPlan containing the ordered scenes and metadata.
         """
+        scenes = []
         if self._provider is not None:
             try:
-                return self.plan_with_llm(script, default_duration)
+                scenes = self.plan_with_llm(script, default_duration)
             except Exception as exc:
                 LOG.warning(
                     f"ScenePlanner: LLM planning failed ({exc}) "
                     "— falling back to heuristic"
                 )
-        return self._heuristic_plan(script, default_duration)
+                
+        if not scenes:
+            scenes = self._heuristic_plan(script, default_duration)
+            
+        duration = sum(s.duration_hint for s in scenes)
+        
+        return VideoGenerationPlan(
+            scenes=scenes,
+            transitions=[],
+            duration_estimate=duration
+        )
 
     def plan_with_llm(
         self, script: str, default_duration: float = 3.0

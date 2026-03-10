@@ -5,8 +5,10 @@ from multigenai.core.temporal_state import TemporalState
 
 @dataclass
 class SceneState:
-    character_reference: Optional[PILImage.Image] = None
-    reference_frame: Optional[PILImage.Image] = None
+    character_reference_path: Optional[str] = None
+    reference_frame_path: Optional[str] = None
+    latent_reference: Optional[str] = None  # Generic path storage for latency caches
+    seed: Optional[int] = None
     environment_prompt: Optional[str] = None
     lighting_prompt: Optional[str] = None
     style_prompt: Optional[str] = None
