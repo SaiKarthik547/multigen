@@ -23,6 +23,7 @@ from multigenai.core.logging.logger import get_logger
 if TYPE_CHECKING:
     from PIL import Image as PILImage
     from multigenai.core.execution_context import ExecutionContext
+    from multigenai.core.temporal_state import TemporalState
     from multigenai.llm.schema_validator import VideoGenerationRequest
 
 LOG = get_logger(__name__)
@@ -170,9 +171,9 @@ class VideoEngine:
         Executes AnimateDiff generation with Temporal Sliding Windowing.
         
         Phase 12 Strategy:
-        - Window 1: Frames 0-15 (16 frames)
-        - Window 2: Frames 8-23 (16 frames)
-        - Blend window: 8 overlapping frames (linear alpha blend)
+        - Window 1 → frames 0-15
+        - Window 2 → frames 12-27
+        - Overlap → 4 frames
         """
         from PIL import Image
         from multigenai.creative.scene_designer import SceneDesigner
@@ -216,7 +217,7 @@ class VideoEngine:
             
             if hasattr(temporal_state, "identity_latent") and temporal_state.identity_latent is not None:
                 id_lat = temporal_state.identity_latent.to(self.device, dtype=self.pipe.dtype)
-                id_lat = id_lat.unsqueeze(2).expand(*shape)
+                id_lat = id_lat.unsqueeze(2).repeat(1, 1, 16, 1, 1)
                 
                 if temporal_state.previous_latent is None:
                     latents = id_lat.clone()
@@ -225,7 +226,22 @@ class VideoEngine:
                         latents = id_lat.clone()
                     else:
                         prev_lat = temporal_state.previous_latent.to(self.device, dtype=self.pipe.dtype)
-                        latents = (prev_lat * 0.7) + (id_lat * 0.3)
+                        
+                        traj_lat = None
+                        if getattr(temporal_state, "previous_frame", None) is not None:
+                            try:
+                                from multigenai.temporal.trajectory_encoder import TrajectoryEncoder
+                                traj_lat = TrajectoryEncoder().encode(self.pipe, temporal_state.previous_frame)
+                                if traj_lat is not None:
+                                    traj_lat = traj_lat.to(self.device, dtype=self.pipe.dtype)
+                                    traj_lat = traj_lat.unsqueeze(2).repeat(1, 1, 16, 1, 1)
+                            except Exception as e:
+                                LOG.warning(f"Failed to encode trajectory latent: {e}")
+                                
+                        if traj_lat is not None:
+                            latents = (prev_lat * 0.6) + (id_lat * 0.25) + (traj_lat * 0.15)
+                        else:
+                            latents = (prev_lat * 0.7) + (id_lat * 0.3)
                 
                 # Structural variance initialization
                 latents = propagator.propagate(latents, drift=0.015, generator=base_generator)
@@ -269,6 +285,10 @@ class VideoEngine:
         # 3. Last 12 frames from Window 2
         final_frames.extend(res2[4:])
         
+        del res1
+        del res2
+        gc.collect()
+        
         LOG.info(f"VideoEngine: Windowing complete. Result length: {len(final_frames)}")
         return final_frames, latents
 
@@ -297,12 +317,14 @@ class VideoEngine:
         effective_frames = 24 
 
         from PIL import Image as PILImage, ImageOps
-        LOG.debug(f"Loading conditioning image (if needed): {conditioning_image_path}")
-        init_image = PILImage.open(conditioning_image_path).convert("RGB")
-        # ISSUE 7 Fix: Use ImageOps.fit to preserve aspect ratio (Phase 13: 768x512)
-        request.width = 768
-        request.height = 512
-        init_image = ImageOps.fit(init_image, (request.width, request.height), method=PILImage.Resampling.LANCZOS)
+        init_image = None
+        if conditioning_image_path is not None:
+            LOG.debug(f"Loading conditioning image (if needed): {conditioning_image_path}")
+            init_image = PILImage.open(conditioning_image_path).convert("RGB")
+            # ISSUE 7 Fix: Use ImageOps.fit to preserve aspect ratio (Phase 13: 768x512)
+            request.width = 768
+            request.height = 512
+            init_image = ImageOps.fit(init_image, (request.width, request.height), method=PILImage.Resampling.LANCZOS)
 
         self._load_model(use_ip_adapter=(init_image is not None))
 

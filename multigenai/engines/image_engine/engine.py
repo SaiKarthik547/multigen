@@ -367,7 +367,7 @@ class ImageEngine:
             )
 
             # Drop base before allocating refiner if forced to unload
-            if request.use_refiner:
+            if request.use_refiner and getattr(self._ctx.settings, "environment", "") != "kaggle":
                 if self._ctx.behaviour.auto_unload_after_gen and self.pipe is not None:
                     ModelLifecycle.safe_unload(self.pipe)
                     self.pipe = None

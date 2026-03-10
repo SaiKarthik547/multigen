@@ -189,14 +189,14 @@ class GenerationManager:
         # --- Phase 13: Scene Planning ---
         planner = ScenePlanner(getattr(self._ctx, "llm", None))
         video_plan = planner.plan(request.prompt)
-
+        seg_dir = None # Prevent undefined variable during fallback
+        
         # Reset scene memory at the start of a generation plan
         self._ctx.scene_memory.reset()
 
         if character_reference_path:
             LOG.info(f"GenerationManager: Loading user character reference from {character_reference_path}")
-            ref = Image.open(character_reference_path).convert("RGB")
-            self._ctx.scene_memory.update(character_reference=ref)
+            self._ctx.scene_memory.update(character_reference_path=character_reference_path)
 
         # STEP 1: ANCHOR GENERATION (SDXL)
         structure = PromptAnalyzer().analyze(request.prompt)
@@ -212,8 +212,7 @@ class GenerationManager:
         if conditioning_image_path:
             # If user provided a starting image, we use it directly as the environment/starting anchor
             LOG.info("GenerationManager: Using provided conditioning image as environment anchor.")
-            ref = Image.open(conditioning_image_path).convert("RGB")
-            self._ctx.scene_memory.update(reference_frame=ref)
+            self._ctx.scene_memory.update(reference_frame_path=conditioning_image_path)
         else:
             LOG.info("GenerationManager: Booting ImageEngine for Anchor Generation...")
             
@@ -231,8 +230,7 @@ class GenerationManager:
                     )
                     char_res = image_engine.run(char_prompt, getattr(request, "negative_prompt", ""), char_req)
                     if char_res.success:
-                        char_img = Image.open(char_res.path).convert("RGB")
-                        self._ctx.scene_memory.update(character_reference=char_img)
+                        self._ctx.scene_memory.update(character_reference_path=char_res.path)
                     else:
                         LOG.error("GenerationManager: Character Anchor generation failed.")
                         return self._video_fail(request, char_res.error)
@@ -244,20 +242,21 @@ class GenerationManager:
                 )
                 env_res = image_engine.run(env_prompt, getattr(request, "negative_prompt", ""), env_req)
                 if env_res.success:
-                    env_img = Image.open(env_res.path).convert("RGB")
-                    self._ctx.scene_memory.update(reference_frame=env_img, environment_prompt=env_prompt)
+                    self._ctx.scene_memory.update(reference_frame_path=env_res.path, environment_prompt=env_prompt)
                 else:
                     LOG.error("GenerationManager: Environment Anchor generation failed.")
                     return self._video_fail(request, env_res.error)
 
                 # Phase 14: Extract Identity Latent while ImageEngine is hot
-                char_img = self._ctx.scene_memory.get().character_reference
-                if char_img is not None:
+                char_path = self._ctx.scene_memory.get().character_reference_path
+                extracted_identity_latent = None
+                if char_path is not None:
                     try:
+                        char_img = Image.open(char_path).convert("RGB")
                         from multigenai.identity.identity_latent_encoder import IdentityLatentEncoder
                         encoder = IdentityLatentEncoder()
                         id_latent = encoder.encode(image_engine.pipe, char_img)
-                        setattr(self._ctx, "identity_latent", id_latent.cpu().clone())
+                        extracted_identity_latent = id_latent.detach().cpu().clone()
                         LOG.info("GenerationManager: Successfully extracted ILC Character Latent.")
                     except Exception as e:
                         LOG.warning(f"GenerationManager: Failed to extract identity latent: {e}")
@@ -276,6 +275,8 @@ class GenerationManager:
             del self._engines["image"]
 
         ModelLifecycle.enforce_cleanup("GenerationManager (ImageEngine > VideoEngine)")
+        if torch.cuda.is_available():
+            LOG.info(f"GenerationManager VRAM Log (Pre-VideoBoot): {torch.cuda.memory_reserved()/1024**2:.0f} MB")
 
         # STEP 2: VIDEO GENERATION (AnimateDiff)
         LOG.info("GenerationManager: Booting isolated VideoEngine (AnimateDiff) for scenes...")
@@ -288,8 +289,8 @@ class GenerationManager:
         temporal_state = TemporalState()
         
         # Inject Identity Latent
-        if hasattr(self._ctx, "identity_latent"):
-            temporal_state.identity_latent = getattr(self._ctx, "identity_latent")
+        if 'extracted_identity_latent' in locals() and extracted_identity_latent is not None:
+            temporal_state.identity_latent = extracted_identity_latent
             
         seg_frames = []
         processor = self._build_processor(model_name="animatediff")
@@ -311,16 +312,8 @@ class GenerationManager:
                 scene_seed = request.seed + temporal_state.scene_index if request.seed is not None else None
                 seg_request = request.model_copy(update={"prompt": seg_prompt, "seed": scene_seed})
                 
-                # Extract starting frame path if available (from Anchor)
-                c_path = None
-                if scene_state.reference_frame:
-                    from multigenai.core.files.workspace import _get_active_workspace
-                    import uuid
-                    import os
-                    # Temporarily save reference frame to disk to pass to engine
-                    temp_dir = _get_active_workspace()
-                    c_path = os.path.join(temp_dir, f"anchor_{uuid.uuid4().hex[:8]}.png")
-                    scene_state.reference_frame.save(c_path)
+                # Extract starting frame path directly using optimized config
+                c_path = scene_state.reference_frame_path
                 
                 LOG.info(f"GenerationManager: Generating scene {scene.scene_id}: {seg_prompt}")
                 frames, new_latents, out_path, seed = video_engine.generate_frames(
@@ -332,7 +325,7 @@ class GenerationManager:
                 
                 # Fallback object wrapping for compatibility with later stitching
                 from types import SimpleNamespace
-                seg_obj = SimpleNamespace(positive=seg_prompt, negative="")
+                seg_obj = SimpleNamespace(positive=seg_prompt, negative="", index=temporal_state.scene_index)
                 seg_frames.append((seg_obj, frames, out_path, seed))
                 
                 # Update Temporal State
@@ -342,7 +335,7 @@ class GenerationManager:
                     temporal_state.scene_index += 1
                     
                     self._ctx.scene_memory.update(
-                        reference_frame=temporal_state.previous_frame,
+                        reference_frame_path=frames[-1],
                         temporal_state=copy.deepcopy(temporal_state)
                     )
 
@@ -355,6 +348,8 @@ class GenerationManager:
             video_engine = None
             
             ModelLifecycle.enforce_cleanup("GenerationManager (VideoEngine > InterpolationEngine)")
+            if torch.cuda.is_available():
+                LOG.info(f"GenerationManager VRAM Log (Post-VideoBoot): {torch.cuda.memory_reserved()/1024**2:.0f} MB")
                     
         except Exception as exc:
             LOG.error(f"GenerationManager: Video generation failed: {exc}", exc_info=True)
@@ -381,7 +376,7 @@ class GenerationManager:
         try:
             # Phase 11/14: Scene Transition Blending & Global Interpolation
             # Strategy: Combine all segments into one global list, blend boundaries, then interpolate ONCE.
-            if plan.is_multi_segment and len(seg_frames) > 1:
+            if len(video_plan.scenes) > 1 and len(seg_frames) > 1:
                 LOG.info("GenerationManager: Merging segments and blending boundaries...")
                 global_frame_paths = []
                 
@@ -403,6 +398,7 @@ class GenerationManager:
                         img_a = [Image.open(p) for p in overlap_a_paths]
                         img_b = [Image.open(p) for p in overlap_b_paths]
                         
+                        from multigenai.engines.transition_engine.engine import TransitionEngine
                         blended_images = TransitionEngine.blend(img_a, img_b, window=blend_window)
                         
                         # Save blended frames to a "blends" subfolder in the first segment's temp dir
@@ -457,7 +453,7 @@ class GenerationManager:
                         
                     results.append(seg_result)
                     LOG.info(
-                        f"GenerationManager: Video segment {seg.index + 1}/{plan.segment_count} done. "
+                        f"GenerationManager: Video segment {seg.index + 1}/{len(video_plan.scenes)} done. "
                         f"path={seg_result.path}"
                     )
         finally:
