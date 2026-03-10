@@ -119,12 +119,22 @@ class GenerationManager:
                 compiled_pos = processor._budget_mgr.trim_positive(compiled_pos)
 
                 try:
+                    ref_img_obj = None
+                    if scene_state.character_reference_path:
+                        with Image.open(scene_state.character_reference_path) as img:
+                            ref_img_obj = img.copy().convert("RGB")
+                            
+                    ctrl_img_obj = None
+                    if scene_state.reference_frame_path:
+                        with Image.open(scene_state.reference_frame_path) as img:
+                            ctrl_img_obj = img.copy().convert("RGB")
+
                     result = engine.run(
                         compiled_pos, 
                         compiled_neg, 
                         seg_request,
-                        ref_image=scene_state.character_reference,
-                        control_image=scene_state.reference_frame
+                        ref_image=ref_img_obj,
+                        control_image=ctrl_img_obj
                     )
 
                     if result.success:
@@ -132,13 +142,12 @@ class GenerationManager:
                             result = self._relocate_result(result, seg_dir, seg.index, "png")
                         
                         # Phase 12: Capture identity for future consistency if not already anchored
-                        img_obj = Image.open(result.path).convert("RGB")
-                        if scene_state.character_reference is None:
+                        if scene_state.character_reference_path is None:
                             LOG.info("GenerationManager: Capturing first image as Character Reference.")
-                            self._ctx.scene_memory.update(character_reference=img_obj)
+                            self._ctx.scene_memory.update(character_reference_path=result.path)
                         
                         # Update structural reference
-                        self._ctx.scene_memory.update(reference_frame=img_obj)
+                        self._ctx.scene_memory.update(reference_frame_path=result.path)
 
                     results.append(result)
                 except Exception as exc:
@@ -267,7 +276,7 @@ class GenerationManager:
         # --- HARD UNLOAD PROTOCOL (PHASE 13) ---
         LOG.info("GenerationManager: Executing Hard Unload of ImageEngine to free VRAM...")
         if hasattr(self, "image_engine") and self.image_engine:
-            ModelLifecycle.safe_unload(self.image_engine)
+            ModelLifecycle.safe_unload(self.image_engine.pipe)
             # Nullify internal dict reference if generated dynamically, or clear explicitly
             self.image_engine.pipe = None
 
@@ -553,7 +562,7 @@ class GenerationManager:
     @staticmethod
     def _image_fail(error: str):
         from multigenai.engines.image_engine.engine import ImageResult
-        return ImageResult(path="", seed=0, success=False, error=error)
+        return ImageResult(path="", width=0, height=0, seed=0, success=False, error=error)
 
     @staticmethod
     def _video_fail(request, error: str):

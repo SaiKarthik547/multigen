@@ -198,6 +198,10 @@ class VideoEngine:
         if self._ctx.settings.video.enable_ip_adapter:
             pipe_kwargs["ip_adapter_image"] = conditioning_image
 
+        if scene_index == 0 and conditioning_image is not None and getattr(temporal_state, "previous_frame", None) is None:
+            # Phase 14 Runtime Fix: Inject exact initialization geometry into trajectory bounds.
+            temporal_state.previous_frame = conditioning_image
+
         LOG.info(f"VideoEngine: Generating 2x16 frame windows with 4-frame overlap (Phase 13)...")
         
         device_type = "cuda" if self.device == "cuda" else "cpu"
@@ -219,6 +223,12 @@ class VideoEngine:
                 id_lat = temporal_state.identity_latent.to(self.device, dtype=self.pipe.dtype)
                 assert id_lat.shape[1] == self.pipe.unet.config.in_channels, \
                     f"Latent channel mismatch! Expected {self.pipe.unet.config.in_channels}, got {id_lat.shape[1]}"
+                
+                # Phase 14 Runtime Fix: Spatial Resizing (SDXL anchor 1024 -> AnimateDiff 768)
+                import torch.nn.functional as F
+                if id_lat.shape[2:] != (shape[3], shape[4]):
+                    id_lat = F.interpolate(id_lat, size=(shape[3], shape[4]), mode="bilinear", align_corners=False)
+                    
                 id_lat = id_lat.unsqueeze(2).repeat(1, 1, 16, 1, 1)
                 
                 if temporal_state.previous_latent is None:
@@ -236,6 +246,10 @@ class VideoEngine:
                                 traj_lat = TrajectoryEncoder().encode(self.pipe, temporal_state.previous_frame)
                                 if traj_lat is not None:
                                     traj_lat = traj_lat.to(self.device, dtype=self.pipe.dtype)
+                                    # Phase 14: Spatial alignment for trajectory maps
+                                    import torch.nn.functional as F
+                                    if traj_lat.shape[2:] != (shape[3], shape[4]):
+                                        traj_lat = F.interpolate(traj_lat, size=(shape[3], shape[4]), mode="bilinear", align_corners=False)
                                     traj_lat = traj_lat.unsqueeze(2).repeat(1, 1, 16, 1, 1)
                             except Exception as e:
                                 LOG.warning(f"Failed to encode trajectory latent: {e}")
@@ -263,9 +277,17 @@ class VideoEngine:
             res1 = res1_raw[0] if isinstance(res1_raw[0], list) else res1_raw
             
             # --- WINDOW 2 (12-27) - 4 frame overlap ---
-            # Phase 14 Fix: Latent noise drift for continuity
-            latents = propagator.propagate(latents, drift=0.015, generator=base_generator)
-            pipe_kwargs["latents"] = latents.clone()
+            # Phase 14 Fix: Properly shift 16-frame sliding latency bounds by pulling back 4 frames
+            new_noise = torch.randn(
+                (1, self.pipe.unet.config.in_channels, 12, shape[3], shape[4]),
+                generator=base_generator, device=self.device, dtype=self.pipe.dtype
+            )
+            
+            latents_w2 = torch.cat([latents[:, :, 12:], new_noise], dim=2)
+            latents_w2 = propagator.propagate(latents_w2, drift=0.015, generator=base_generator)
+            latents_w2 = torch.clamp(latents_w2, -4.0, 4.0)
+            
+            pipe_kwargs["latents"] = latents_w2
             
             if "image" in self.pipe.__call__.__code__.co_varnames:
                 pipe_kwargs["image"] = res1[-1]  # Anchor to Window 1 end

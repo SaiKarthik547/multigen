@@ -161,7 +161,9 @@ class ScenePlanner:
         Returns:
             VideoGenerationPlan containing the ordered scenes and metadata.
         """
+        MAX_SCENES = 6
         scenes = []
+        
         if self._provider is not None:
             try:
                 scenes = self.plan_with_llm(script, default_duration)
@@ -173,6 +175,9 @@ class ScenePlanner:
                 
         if not scenes:
             scenes = self._heuristic_plan(script, default_duration)
+
+        # Apply safety length limit (Phase 14)
+        scenes = scenes[:MAX_SCENES]
             
         duration = sum(s.duration_hint for s in scenes)
         

@@ -29,7 +29,21 @@ class IdentityLatentEncoder:
 
         # Use the pipeline's native image processor to guarantee correct normalization
         image_tensor = pipe.image_processor.preprocess(image)
-        image_tensor = image_tensor.to(device=pipe.device, dtype=pipe.dtype)
+
+        # Ensure we match the device of the actual VAE weights to avoid offload mismatches (Phase 14 Kaggle)
+        # Initialize vae_device to a default before the try block to prevent UnboundLocalError
+        # in case both try and except blocks fail to assign it (though unlikely with current logic).
+        # Also, ensure mock objects or pipelines without parameters accessible via next()
+        # correctly fall back to the pipe's device or 'cpu'.
+        vae_device = "cpu" # Default fallback
+        try:
+            # Attempt to get the device from VAE parameters
+            vae_device = next(pipe.vae.parameters()).device
+        except (StopIteration, AttributeError):
+            # Fallback for mock objects or pipelines without parameters accessible via next()
+            vae_device = getattr(pipe, "device", "cpu")
+            
+        image_tensor = image_tensor.to(device=vae_device, dtype=pipe.dtype)
 
         with torch.no_grad():
             latent = pipe.vae.encode(image_tensor).latent_dist.sample()

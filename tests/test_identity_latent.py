@@ -11,6 +11,8 @@ class TestIdentityLatentEncoder:
         mock_pipe.device = torch.device("cpu")
         mock_pipe.dtype = torch.float32
         mock_pipe.vae.config.scaling_factor = 0.18215
+        # Ensure parameters() doesn't return an infinite Mock iterator
+        mock_pipe.vae.parameters.return_value = iter([])
         
         # Mock the image processor output
         mock_tensor = torch.randn(1, 3, 512, 512)

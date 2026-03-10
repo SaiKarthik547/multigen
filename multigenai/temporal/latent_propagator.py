@@ -34,5 +34,5 @@ class LatentPropagator:
         """
         import torch
         
-        noise = torch.randn_like(latents, generator=generator)
+        noise = torch.randn(latents.shape, generator=generator, device=latents.device, dtype=latents.dtype)
         return latents + noise * drift
