@@ -13,3 +13,9 @@ class TemporalState:
     previous_latent: Optional[torch.Tensor] = None
     identity_latent: Optional[torch.Tensor] = None
     scene_index: int = 0
+    
+    def reset(self) -> None:
+        self.previous_frame = None
+        self.previous_latent = None
+        self.identity_latent = None
+        self.scene_index = 0

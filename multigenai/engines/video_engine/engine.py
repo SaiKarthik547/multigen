@@ -213,10 +213,12 @@ class VideoEngine:
                 512 // self.pipe.vae_scale_factor, 
                 768 // self.pipe.vae_scale_factor
             )
-            base_generator = torch.Generator(device=self.device).manual_seed(seed)
+            base_generator = torch.Generator(device=self.device).manual_seed(seed + scene_index)
             
             if hasattr(temporal_state, "identity_latent") and temporal_state.identity_latent is not None:
                 id_lat = temporal_state.identity_latent.to(self.device, dtype=self.pipe.dtype)
+                assert id_lat.shape[1] == self.pipe.unet.config.in_channels, \
+                    f"Latent channel mismatch! Expected {self.pipe.unet.config.in_channels}, got {id_lat.shape[1]}"
                 id_lat = id_lat.unsqueeze(2).repeat(1, 1, 16, 1, 1)
                 
                 if temporal_state.previous_latent is None:
@@ -245,6 +247,7 @@ class VideoEngine:
                 
                 # Structural variance initialization
                 latents = propagator.propagate(latents, drift=0.015, generator=base_generator)
+                latents = torch.clamp(latents, -4.0, 4.0)
             else:
                 latents = torch.randn(shape, generator=base_generator, device=self.device, dtype=self.pipe.dtype)
             

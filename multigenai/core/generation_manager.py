@@ -269,7 +269,7 @@ class GenerationManager:
         if hasattr(self, "image_engine") and self.image_engine:
             ModelLifecycle.safe_unload(self.image_engine)
             # Nullify internal dict reference if generated dynamically, or clear explicitly
-            self.image_engine = None
+            self.image_engine.pipe = None
 
         if hasattr(self, "_engines") and "image" in self._engines:
             del self._engines["image"]
@@ -330,7 +330,8 @@ class GenerationManager:
                 
                 # Update Temporal State
                 if frames:
-                    temporal_state.previous_frame = Image.open(frames[-1]).convert("RGB")
+                    with Image.open(frames[-1]) as img:
+                        temporal_state.previous_frame = img.copy().convert("RGB")
                     temporal_state.previous_latent = new_latents
                     temporal_state.scene_index += 1
                     
@@ -338,11 +339,6 @@ class GenerationManager:
                         reference_frame_path=frames[-1],
                         temporal_state=copy.deepcopy(temporal_state)
                     )
-
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            
             # Final destruction of video engine
             video_engine._unload_model()
             video_engine = None
@@ -395,8 +391,15 @@ class GenerationManager:
                         overlap_b_paths = frames[:blend_window]
                         
                         # Load images for blending
-                        img_a = [Image.open(p) for p in overlap_a_paths]
-                        img_b = [Image.open(p) for p in overlap_b_paths]
+                        img_a = []
+                        for p in overlap_a_paths:
+                            with Image.open(p) as img:
+                                img_a.append(img.copy().convert("RGB"))
+                                
+                        img_b = []
+                        for p in overlap_b_paths:
+                            with Image.open(p) as img:
+                                img_b.append(img.copy().convert("RGB"))
                         
                         from multigenai.engines.transition_engine.engine import TransitionEngine
                         blended_images = TransitionEngine.blend(img_a, img_b, window=blend_window)
@@ -415,9 +418,6 @@ class GenerationManager:
                         
                         # Replace the tail of A and head of B with the blended sequence
                         global_frame_paths = global_frame_paths[:-blend_window] + new_blend_paths + list(frames[blend_window:])
-                        
-                        # Cleanup
-                        for img in img_a + img_b: img.close()
 
                 # Global Interpolation (Interpolate once for consistent motion)
                 if interp_engine:

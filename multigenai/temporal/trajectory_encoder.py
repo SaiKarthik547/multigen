@@ -29,4 +29,6 @@ class TrajectoryEncoder:
         else:
             return None
             
-        return latents * scaling_factor
+        latents = latents * scaling_factor
+        latents = latents.to(pipe.dtype)
+        return torch.clamp(latents, -4.0, 4.0)
