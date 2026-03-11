@@ -303,6 +303,7 @@ class GenerationManager:
             
         seg_frames = []
         processor = self._build_processor(model_name="animatediff")
+        total_frame_count = 0  # Phase 16: Track sequence length for safety reset
         
         try:
             for scene in video_plan.scenes:
@@ -363,6 +364,16 @@ class GenerationManager:
 
                 # Update Temporal State
                 if frames:
+                    total_frame_count += len(frames)
+
+                    # Phase 16: Long sequence safety to prevent accumulating drift
+                    if total_frame_count > 600:
+                        LOG.warning(f"GenerationManager: Sequence exceeded 600 frames ({total_frame_count}). Forcing keyframe flush to kill drift.")
+                        temporal_state.global_latent = None
+                        temporal_state.previous_latent = None
+                        temporal_state.latent_velocity = None
+                        total_frame_count = 0
+
                     last_frame = frames[-1]
                     if isinstance(last_frame, str):
                         with Image.open(last_frame) as img:
@@ -372,8 +383,14 @@ class GenerationManager:
 
                     # Phase 15: persist global + previous latent for next scene
                     # VideoEngine already returns CPU-detached tensors — no .cpu() needed
-                    temporal_state.previous_latent = new_latents  # already CPU
-                    temporal_state.global_latent = temporal_state.previous_latent
+                    if temporal_state.global_latent is not None:
+                         temporal_state.previous_latent = new_latents  # already CPU
+                         temporal_state.global_latent = temporal_state.previous_latent
+                    else: 
+                         # We just reset latents to kill drift, so start the chain fresh
+                         temporal_state.previous_latent = new_latents
+                         temporal_state.global_latent = temporal_state.previous_latent
+
                     temporal_state.scene_index += 1
 
                     ref_path = last_frame if isinstance(last_frame, str) else None

@@ -59,6 +59,9 @@ class SceneDescriptor:
     def __post_init__(self):
         if self.characters is None:
             self.characters = []
+        # Phase 16: Quality Guard — minimum 24 frames (3.0s at 8fps) per scene
+        if self.duration_hint < 3.0:
+            self.duration_hint = 3.0
 
 @dataclass
 class VideoGenerationPlan:

@@ -86,4 +86,14 @@ class LatentPropagator:
 
         # Directional step: nudge latents along trajectory
         propagated = latents + velocity * 0.05
-        return torch.clamp(propagated, -4.0, 4.0), velocity
+        
+        # Phase 16: Apply temporal smoothing to reduce pose jitter
+        smoothed = self.smooth(propagated, prev_latent)
+        
+        return torch.clamp(smoothed, -4.0, 4.0), velocity
+
+    def smooth(self, latent: torch.Tensor, prev: Optional[torch.Tensor]) -> torch.Tensor:
+        """Phase 16 Temporal smoothing to reduce pose jitter."""
+        if prev is None:
+            return latent
+        return 0.9 * latent + 0.1 * prev

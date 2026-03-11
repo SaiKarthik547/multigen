@@ -344,7 +344,18 @@ class VideoEngine:
         del res2
         gc.collect()
 
-        LOG.info(f"VideoEngine: Windowing complete. Frames: {len(final_frames)}")
+        # Phase 16: Generation Telemetry
+        velocity_norm = torch.norm(velocity).item() if 'velocity' in locals() and velocity is not None else 0.0
+        latent_std = latents.std().item() if latents is not None else 0.0
+        vram_usage = torch.cuda.memory_reserved() / 1024**2 if torch.cuda.is_available() else 0.0
+
+        LOG.info(
+            f"VideoEngine Telemetry | "
+            f"Frames: {len(final_frames)} | "
+            f"Latent STD: {latent_std:.3f} | "
+            f"Velocity Norm: {velocity_norm:.3f} | "
+            f"VRAM: {vram_usage:.0f} MB"
+        )
 
         # Persist global_latent on CPU (before latents go out of scope or get .cpu() called externally)
         temporal_state.global_latent = latents.detach().cpu()

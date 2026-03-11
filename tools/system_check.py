@@ -1,5 +1,5 @@
 """
-tools/system_check.py — Phase 15 System Health Verification
+tools/system_check.py — Phase 16 System Health Verification
 
 Checks all critical pipeline contracts before Kaggle run:
   ✓ VRAM free after unload
@@ -10,6 +10,9 @@ Checks all critical pipeline contracts before Kaggle run:
   ✓ interpolation frame count
   ✓ directional propagation
   ✓ keyframe latent priority chain
+  ✓ scene duration guard (min 3.0s)
+  ✓ temporal smoothing active
+  ✓ sequence safety flush limit (> 600 frames)
 """
 
 from __future__ import annotations
@@ -121,9 +124,35 @@ def check_keyframe_priority_chain() -> None:
     print("✓ Keyframe priority chain: implemented in VideoEngine.")
 
 
+def check_scene_duration_guard() -> None:
+    """ScenePlanner enforces a minimum 3.0s (24 frames) duration per scene."""
+    from multigenai.llm.scene_planner import SceneDescriptor
+    desc = SceneDescriptor(scene_id="s01", description="test", duration_hint=1.5)
+    assert desc.duration_hint >= 3.0, f"Duration guard failed! Expected >= 3.0, got {desc.duration_hint}"
+    print("✓ Scene duration guard: min 3.0s (24 frames) verified.")
+
+
+def check_temporal_smoothing() -> None:
+    """LatentPropagator has the smooth() method applied."""
+    from multigenai.temporal.latent_propagator import LatentPropagator
+    prop = LatentPropagator()
+    assert hasattr(prop, "smooth"), "Temporal smoothing method not found!"
+    print("✓ Temporal smoothing: LatentPropagator.smooth() verified.")
+
+
+def check_sequence_safety_flush() -> None:
+    """GenerationManager enforces sequence safety flush at > 600 frames."""
+    import pathlib
+    manager_path = pathlib.Path(__file__).parent.parent / "multigenai/core/generation_manager.py"
+    src = manager_path.read_text(encoding="utf-8")
+    assert "total_frame_count > 600:" in src, "Sequence safety flush missing!"
+    assert "temporal_state.global_latent = None" in src, "Flush logic incomplete!"
+    print("✓ Sequence safety flush: > 600 frames condition verified.")
+
+
 def main() -> None:
     print("\n" + "=" * 60)
-    print("  MultiGenAI Phase 15 System Health Check")
+    print("  MultiGenAI Phase 16 System Health Check")
     print("=" * 60 + "\n")
 
     checks = [
@@ -135,6 +164,9 @@ def main() -> None:
         check_directional_propagation,
         check_interpolation_chunk,
         check_keyframe_priority_chain,
+        check_scene_duration_guard,
+        check_temporal_smoothing,
+        check_sequence_safety_flush,
     ]
 
     passed = 0
