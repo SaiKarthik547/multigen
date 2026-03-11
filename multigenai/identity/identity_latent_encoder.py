@@ -38,29 +38,23 @@ class IdentityLatentEncoder:
             torch.Tensor: Latent [1, C, H/8, W/8] scaled by VAE scaling_factor,
                           on the same device as the VAE weights, detached from graph.
         """
+        import numpy as np
+
         # Resolve the real execution device. Diffusers pipelines with CPU offloading
         # will report module parameters as "cpu" while resting, but execute on "cuda".
-        # pipe._execution_device is the official, safe property.
-        vae_device = getattr(pipe, "_execution_device", getattr(pipe, "device", None))
-        if vae_device is None:
-            vae_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        vae_device = next(pipe.vae.parameters()).device
+        vae_dtype = next(pipe.vae.parameters()).dtype
 
-        # Preprocess PIL → normalised tensor [-1, 1] using diffusers processor
-        if hasattr(pipe, "image_processor") and pipe.image_processor is not None:
-            image_tensor = pipe.image_processor.preprocess(image)
-        else:
-            from diffusers.image_processor import VaeImageProcessor
-            processor = VaeImageProcessor(vae_scale_factor=8)
-            image_tensor = processor.preprocess(image)
-
-        # Cast to VAE device + fp16 to match AnimateDiff domain exactly
-        image_tensor = image_tensor.to(device=vae_device, dtype=torch.float16)
+        # Exact RGB normalization as specified by user
+        image = image.convert("RGB")
+        img_arr = np.array(image).astype(np.float32) / 255.0
+        image_tensor = torch.from_numpy(img_arr).permute(2, 0, 1).unsqueeze(0)
+        image_tensor = (image_tensor * 2 - 1).to(device=vae_device, dtype=vae_dtype)
 
         with torch.no_grad():
             latent = pipe.vae.encode(image_tensor).latent_dist.sample()
 
-        # Scale by the VAE scaling factor (0.18215 for SD1.5, 0.13025 for SDXL)
-        scaling_factor = getattr(pipe.vae.config, "scaling_factor", 0.18215)
-        latent = latent * scaling_factor
+        # Scale by the exact VAE scaling factor requested
+        latent = latent * 0.18215
 
         return latent.detach()

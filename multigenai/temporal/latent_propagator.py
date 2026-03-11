@@ -93,7 +93,7 @@ class LatentPropagator:
         return torch.clamp(smoothed, -4.0, 4.0), velocity
 
     def smooth(self, latent: torch.Tensor, prev: Optional[torch.Tensor]) -> torch.Tensor:
-        """Phase 16 Temporal smoothing to reduce pose jitter."""
+        """Phase F Temporal smoothing to reduce pose jitter."""
         if prev is None:
             return latent
-        return 0.9 * latent + 0.1 * prev
+        return 0.85 * latent + 0.15 * prev

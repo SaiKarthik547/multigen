@@ -25,7 +25,7 @@ from typing import List
 # ---------------------------------------------------------------------------
 # Default budget constants (overridden by PromptSettings at runtime)
 # ---------------------------------------------------------------------------
-_DEFAULT_MAX_TOKENS: int = 70         # CLIP usable limit: 77 total - 2 BOS/EOS - 5 safety headroom
+_DEFAULT_MAX_TOKENS: int = 55         # Phase D: CLI token overflow fix
 _DEFAULT_NEG_RESERVE: int = 32        # tokens reserved for negative prompt
 _DEFAULT_POS_BUDGET: int = _DEFAULT_MAX_TOKENS - _DEFAULT_NEG_RESERVE  # 55
 
@@ -96,11 +96,9 @@ class TokenBudgetManager:
         """
         if not text or not text.strip():
             return 0
-        # Split on whitespace + punctuation boundaries (conservative BPE proxy)
+        # Split on whitespace + punctuation boundaries
         tokens = re.findall(r"[\w']+|[.,;:!?–—\"\'()\[\]{}]", text)
-        # Apply 1.5x scalar because CLIP BPE routinely splits long adjectives into 2-3 tokens
-        import math
-        return math.ceil(len(tokens) * 1.5)
+        return len(tokens)
 
     def fits_positive_budget(self, text: str) -> bool:
         """Return True if text fits within the positive token budget."""

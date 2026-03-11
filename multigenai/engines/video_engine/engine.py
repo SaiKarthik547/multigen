@@ -112,8 +112,8 @@ class VideoEngine:
             if hasattr(self.pipe, "enable_model_cpu_offload"):
                 self.pipe.enable_model_cpu_offload()
             
-            if hasattr(self.pipe, "enable_vae_slicing"):
-                self.pipe.enable_vae_slicing()
+            if hasattr(self.pipe.vae, "enable_slicing"):
+                self.pipe.vae.enable_slicing()
 
             if hasattr(self.pipe, "enable_attention_slicing"):
                 self.pipe.enable_attention_slicing("max")
@@ -157,6 +157,29 @@ class VideoEngine:
         except Exception as exc:
             LOG.warning(f"Error flushing CUDA memory: {exc}")
 
+    def decode_latents(self, latents: "torch.Tensor") -> List["PILImage"]:
+        """Decode latents to PIL Images correctly per Phase A."""
+        import torch
+        from PIL import Image
+
+        B, C, T, H, W = latents.shape
+
+        # correct scaling for AnimateDiff pipeline
+        latents = latents / 0.18215
+
+        # reshape for VAE decode: [B*T, C, H, W]
+        latents = latents.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
+
+        with torch.no_grad():
+            images = self.pipe.vae.decode(latents).sample
+
+        images = (images / 2 + 0.5).clamp(0, 1)
+        images = images.cpu().permute(0, 2, 3, 1).numpy()
+        images = (images * 255).astype("uint8")
+
+        frames = [Image.fromarray(img) for img in images]
+        return frames
+
     def _generate_video(
         self,
         request: "VideoGenerationRequest",
@@ -188,6 +211,9 @@ class VideoEngine:
         # SceneDesigner: builds enriched prompt with camera + motion tokens
         blueprint = SceneDesigner().design_video(request, scene_index=scene_index)
         motion_prompt, negative_prompt = PromptCompiler().compile(blueprint, "animatediff")
+        
+        # Hard truncate prompt characters to ensure absolute safety (Phase 10)
+        motion_prompt = motion_prompt[:220]
 
         # Base kwargs
         pipe_kwargs = {
@@ -249,12 +275,13 @@ class VideoEngine:
                 id_lat = temporal_state.identity_latent.to(self.device, dtype=self.pipe.dtype)
                 if id_lat.shape[2:] != (H, W):
                     id_lat = F.interpolate(id_lat, size=(H, W), mode="bilinear", align_corners=False)
-                id_lat = id_lat.unsqueeze(2).repeat(1, 1, WINDOW_SIZE, 1, 1)
+                # Expand keyframe to full temporal window
+                id_lat_expanded = id_lat.unsqueeze(2).repeat(1, 1, WINDOW_SIZE, 1, 1)
 
                 if temporal_state.previous_latent is None:
-                    latents = id_lat.clone()
+                    latents = id_lat_expanded.clone()
                 elif scene_index > 0 and scene_index % 3 == 0:
-                    latents = id_lat.clone()
+                    latents = id_lat_expanded.clone()
                 else:
                     prev_lat = temporal_state.previous_latent.to(self.device, dtype=self.pipe.dtype)
 
@@ -273,9 +300,12 @@ class VideoEngine:
                             LOG.warning(f"Failed to encode trajectory latent: {e}")
 
                     if traj_lat is not None:
-                        latents = (prev_lat * 0.6) + (id_lat * 0.25) + (traj_lat * 0.15)
+                        latents = (prev_lat * 0.6) + (id_lat_expanded * 0.25) + (traj_lat * 0.15)
                     else:
-                        latents = (prev_lat * 0.7) + (id_lat * 0.3)
+                        latents = (prev_lat * 0.7) + (id_lat_expanded * 0.3)
+
+                # Phase I: Frame 0 Identity Injection
+                latents[:, :, 0] = id_lat.squeeze(2)
 
                 # Apply directional propagation
                 latents, velocity = propagator.propagate(
@@ -299,8 +329,11 @@ class VideoEngine:
                 pipe_kwargs["image"] = conditioning_image
                 pipe_kwargs["strength"] = 0.75
 
+            pipe_kwargs["output_type"] = "latent"
+
             res1_raw = self.pipe(**pipe_kwargs).frames
-            res1 = res1_raw[0] if isinstance(res1_raw[0], list) else res1_raw
+            res1_lat = res1_raw[0] if isinstance(res1_raw[0], list) else res1_raw
+            res1 = self.decode_latents(res1_lat) if isinstance(res1_lat, torch.Tensor) else res1_lat
 
             # --- WINDOW 2 (OVERLAP frames carryover + fresh noise) ---
             # Carry the LAST OVERLAP frames of window 1 as warm start, append fresh noise
@@ -326,8 +359,11 @@ class VideoEngine:
                 pipe_kwargs["image"] = res1[-1]   # anchor to last frame of W1
                 pipe_kwargs["strength"] = 0.6
 
+            pipe_kwargs["output_type"] = "latent"
+
             res2_raw = self.pipe(**pipe_kwargs).frames
-            res2 = res2_raw[0] if isinstance(res2_raw[0], list) else res2_raw
+            res2_lat = res2_raw[0] if isinstance(res2_raw[0], list) else res2_raw
+            res2 = self.decode_latents(res2_lat) if isinstance(res2_lat, torch.Tensor) else res2_lat
 
         # --- Linear temporal blending over OVERLAP frames ---
         final_frames = []

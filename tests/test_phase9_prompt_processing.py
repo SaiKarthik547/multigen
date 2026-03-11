@@ -41,13 +41,12 @@ class TestTokenBudgetManager:
     def test_count_tokens_simple(self):
         mgr = self._make()
         count = mgr.count_tokens("a knight at dawn")
-        assert count == 6  # 4 words * 1.5 scalar = 6
+        assert count == 4
 
     def test_count_tokens_comma_phrase(self):
         mgr = self._make()
-        # "blurry, low quality" → 3 tokens + 1 comma punct = 4 * 1.5 = 6
         count = mgr.count_tokens("blurry, low quality")
-        assert count >= 6
+        assert count >= 3
 
     def test_fits_positive_budget_short(self):
         mgr = self._make()

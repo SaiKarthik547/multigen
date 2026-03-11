@@ -233,13 +233,16 @@ class ScenePlanner:
             if tod not in _VALID_TIMES:
                 tod = "noon"
 
+            # Phase H: duration guard
+            duration_hint = max(float(item.duration_hint or default_duration), 3.0)
+
             scenes.append(SceneDescriptor(
                 scene_id=f"s{idx + 1:02d}",
                 description=item.description,
                 characters=item.characters,
                 location=item.location,
                 time_of_day=tod,
-                duration_hint=item.duration_hint or default_duration,
+                duration_hint=duration_hint,
                 notes=item.title,
             ))
 
@@ -254,16 +257,25 @@ class ScenePlanner:
         self, script: str, default_duration: float
     ) -> List[SceneDescriptor]:
         """Rule-based sentence-split fallback."""
-        sentences = self._split_sentences(script)
+        if re.search(r"Scene\s+1", script, re.IGNORECASE):
+            raw_scenes = re.split(r"Scene\s+\d+[-–:]?", script)
+            sentences = [s.strip() for s in raw_scenes if s.strip()]
+        else:
+            sentences = self._split_sentences(script)
+            
         scenes: List[SceneDescriptor] = []
         for idx, sentence in enumerate(sentences):
             if not sentence.strip():
                 continue
+            
+            # Phase H: duration guard against ultra short fragmented sentences
+            duration_hint = max(float(default_duration), 3.0)
+            
             scenes.append(SceneDescriptor(
                 scene_id=f"s{idx + 1:02d}",
                 description=sentence.strip(),
                 time_of_day=self._detect_time_of_day(sentence),
-                duration_hint=default_duration,
+                duration_hint=duration_hint,
             ))
         LOG.info(f"ScenePlanner (heuristic): split script into {len(scenes)} scenes")
         return scenes
