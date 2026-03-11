@@ -8,6 +8,7 @@ class TestTrajectoryEncoder:
     def test_encode_success(self):
         pipe = MagicMock()
         pipe.device = torch.device('cpu')
+        pipe._execution_device = torch.device('cpu')
         pipe.dtype = torch.float32
         pipe.vae.config.scaling_factor = 0.5
         

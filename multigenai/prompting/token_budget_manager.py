@@ -98,7 +98,9 @@ class TokenBudgetManager:
             return 0
         # Split on whitespace + punctuation boundaries (conservative BPE proxy)
         tokens = re.findall(r"[\w']+|[.,;:!?–—\"\'()\[\]{}]", text)
-        return len(tokens)
+        # Apply 1.5x scalar because CLIP BPE routinely splits long adjectives into 2-3 tokens
+        import math
+        return math.ceil(len(tokens) * 1.5)
 
     def fits_positive_budget(self, text: str) -> bool:
         """Return True if text fits within the positive token budget."""

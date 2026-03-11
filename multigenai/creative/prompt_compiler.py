@@ -45,9 +45,10 @@ class PromptCompiler:
     )
 
     # CLIP text encoder hard limit is 77 tokens (including BOS/EOS).
-    # We cap at 70 to leave headroom for the special tokens and avoid the
-    # "Token indices sequence length … > 77" warning in SDXL/SVD pipelines.
-    _MAX_TOKENS = 70
+    # We cap at 45 to leave headroom for _QUALITY_TOKENS (≈ 12 words) and BPE subwords
+    # (1 word ≈ 1.5 tokens). This absolutely avoids the "Token indices sequence length 
+    # > 77" warning in SDXL/SVD pipelines and silent truncation.
+    _MAX_TOKENS = 45
 
     def _truncate_prompt(self, text: str) -> str:
         """

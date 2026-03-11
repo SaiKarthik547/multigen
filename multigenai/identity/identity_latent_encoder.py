@@ -46,7 +46,12 @@ class IdentityLatentEncoder:
             vae_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Preprocess PIL → normalised tensor [-1, 1] using diffusers processor
-        image_tensor = pipe.image_processor.preprocess(image)
+        if hasattr(pipe, "image_processor") and pipe.image_processor is not None:
+            image_tensor = pipe.image_processor.preprocess(image)
+        else:
+            from diffusers.image_processor import VaeImageProcessor
+            processor = VaeImageProcessor(vae_scale_factor=8)
+            image_tensor = processor.preprocess(image)
 
         # Cast to VAE device + fp16 to match AnimateDiff domain exactly
         image_tensor = image_tensor.to(device=vae_device, dtype=torch.float16)
