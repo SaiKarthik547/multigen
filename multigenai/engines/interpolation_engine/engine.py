@@ -224,7 +224,8 @@ class InterpolationEngine:
             expanded_paths: List[str] = []
             frame_idx = 0
 
-            LOG.info(f"InterpolationEngine: Processing {len(frames)} keyframes (factor={factor}).")
+            CHUNK_SIZE = 64  # Phase 15: flush PIL/VRAM memory every N pairs to prevent spikes
+            LOG.info(f"InterpolationEngine: Processing {len(frames)} keyframes (factor={factor}, chunk_size={CHUNK_SIZE}).")
 
             for i in range(len(frames) - 1):
                 # Load Pair (Handle both PIL and Path)
@@ -265,6 +266,17 @@ class InterpolationEngine:
                         img0_ctx.close()
                     if isinstance(source1, (str, pathlib.Path)):
                         img1_ctx.close()
+
+                # Phase 15: flush memory every CHUNK_SIZE pairs to prevent PIL/VRAM accumulation
+                if (i + 1) % CHUNK_SIZE == 0:
+                    import gc as _gc
+                    _gc.collect()
+                    try:
+                        import torch as _torch
+                        if _torch.cuda.is_available():
+                            _torch.cuda.empty_cache()
+                    except Exception:
+                        pass
                 
             # Save Last Frame (Handle both)
             source_last = frames[-1]

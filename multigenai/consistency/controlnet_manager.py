@@ -1,78 +1,44 @@
-from typing import Optional
-from PIL import Image as PILImage
+"""
+ControlNetManager — Phase 15 VRAM Guard Shim
+
+ControlNet + DepthAnything has been retired from the active pipeline to
+stay within the Kaggle T4 15 GB VRAM budget. The real implementations are
+preserved in:
+  legacy/models/controlnet/controlnet_manager_sdxl.py   (full SDXL ControlNet + DepthAnything)
+  legacy/models/controlnet/controlnet_manager_stub.py   (Phase 4 stub)
+
+This shim is a safe no-op on construction and raises a clear RuntimeError
+if any method is actually invoked, making misconfiguration immediately obvious.
+"""
+
+from __future__ import annotations
 from multigenai.core.logging.logger import get_logger
 
 LOG = get_logger(__name__)
 
+_RETIRED_MSG = (
+    "ControlNet + DepthAnything is retired (Phase 15 VRAM guard). "
+    "Real implementation: legacy/models/controlnet/controlnet_manager_sdxl.py"
+)
+
+
 class ControlNetManager:
     """
-    Manages ControlNet loading and Depth Map generation using memory-safe
-    DepthAnythingSmall (LiheYoung/depth-anything-small-hf).
+    No-op shim for the retired ControlNet + DepthAnything integration.
+
+    Instantiation is safe and free. Any call to load() or get_depth_map()
+    raises RuntimeError immediately so misconfigured code surfaces fast.
     """
-    def __init__(self, device: str):
+
+    def __init__(self, device: str) -> None:
         self.device = device
-        self.controlnet = None
+        self.controlnet = None          # attribute expected by image_engine.py
         self.depth_estimator = None
         self.feature_extractor = None
+        LOG.debug("ControlNetManager: retired shim instantiated (VRAM guard).")
 
     def load(self) -> None:
-        """Lazy load the ControlNet model and Depth Estimator components."""
-        import torch
-        from diffusers import ControlNetModel
-        from transformers import AutoImageProcessor, AutoModelForDepthEstimation
-        
-        if self.controlnet is not None:
-             return
+        raise RuntimeError(_RETIRED_MSG)
 
-        LOG.info("Loading ControlNet (depth-sdxl-1.0) and DepthAnythingSmall...")
-
-        self.controlnet = ControlNetModel.from_pretrained(
-            "diffusers/controlnet-depth-sdxl-1.0",
-            torch_dtype=torch.float16,
-            use_safetensors=True
-        ).to(self.device)
-        
-        self.depth_estimator = AutoModelForDepthEstimation.from_pretrained(
-            "LiheYoung/depth-anything-small-hf"
-        ).to("cpu")
-        
-        self.feature_extractor = AutoImageProcessor.from_pretrained(
-            "LiheYoung/depth-anything-small-hf"
-        )
-
-    def get_depth_map(self, image: PILImage.Image) -> PILImage.Image:
-        """
-        Generate a depth map from the reference frame to structurally condition 
-        the next segment. Dynamically matches input spatial resolution.
-        """
-        import numpy as np
-        import torch
-        from PIL import Image
-        
-        LOG.debug(f"Generating depth map from {image.size} reference frame...")
-
-        # DepthAnythingSmall estimation runs on CPU to save VRAM
-        image_tensor = self.feature_extractor(images=image, return_tensors="pt").pixel_values.to("cpu")
-        
-        with torch.no_grad():
-            depth_map = self.depth_estimator(image_tensor).predicted_depth
-        
-        if isinstance(depth_map, tuple):
-            depth_map = depth_map[0]
-
-        w, h = image.size
-        depth_map = torch.nn.functional.interpolate(
-            depth_map.unsqueeze(1),
-            size=(h, w),
-            mode="bicubic",
-            align_corners=False,
-        )
-        
-        depth_min = torch.amin(depth_map, dim=[1, 2, 3], keepdim=True)
-        depth_max = torch.amax(depth_map, dim=[1, 2, 3], keepdim=True)
-        depth_map = (depth_map - depth_min) / (depth_max - depth_min + 1e-8)
-        depth_image_tensor = torch.cat([depth_map] * 3, dim=1)
-
-        depth_image_tensor = depth_image_tensor.permute(0, 2, 3, 1).cpu().numpy()[0]
-        depth_image = Image.fromarray((depth_image_tensor * 255.0).clip(0, 255).astype(np.uint8))
-        return depth_image
+    def get_depth_map(self, image):
+        raise RuntimeError(_RETIRED_MSG)

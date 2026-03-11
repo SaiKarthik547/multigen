@@ -307,52 +307,87 @@ class GenerationManager:
         try:
             for scene in video_plan.scenes:
                 scene_state = self._ctx.scene_memory.get()
-                
+
                 # Enrich scene description with environment anchor
                 raw_prompt = scene.description
                 if scene_state.environment_prompt and scene_state.environment_prompt not in raw_prompt:
                     raw_prompt += ", " + scene_state.environment_prompt
-                    
+
                 # Phase 14: Token Safety
                 seg_plan = processor.process(raw_prompt, force_single_segment=True)
                 seg_prompt = seg_plan.segments[0].positive if seg_plan.segments else raw_prompt
-                    
+
                 # Phase 14: Seed differentiation
                 scene_seed = request.seed + temporal_state.scene_index if request.seed is not None else None
                 seg_request = request.model_copy(update={"prompt": seg_prompt, "seed": scene_seed})
-                
-                # Extract starting frame path directly using optimized config
+
+                # Phase 15: Keyframe Anchor Strategy
+                # Each scene generates a dedicated SDXL keyframe used to initialize
+                # the AnimateDiff latent — this is the biggest consistency upgrade.
+                keyframe_path = scene.keyframe_path or scene_state.reference_frame_path
+                keyframe_latent = None
+
+                if keyframe_path:
+                    if video_engine.pipe is None:
+                        video_engine._load_model()
+                    
+                    try:
+                        with Image.open(keyframe_path) as kf_img:
+                            kf_img_rgb = kf_img.copy().convert("RGB")
+                        from multigenai.identity.identity_latent_encoder import IdentityLatentEncoder
+                        keyframe_latent = IdentityLatentEncoder().encode(video_engine.pipe, kf_img_rgb)
+                        LOG.info(f"GenerationManager: Keyframe latent extracted for scene {scene.scene_id}.")
+                    except Exception as ke:
+                        LOG.warning(f"GenerationManager: Keyframe encoding failed ({ke}), no latent seed.")
+
+                # Phase 15: pull global latent forward as prior context
+                if temporal_state.global_latent is not None:
+                    temporal_state.previous_latent = temporal_state.global_latent
+
+                # Extract starting frame path
                 c_path = scene_state.reference_frame_path
-                
+
                 LOG.info(f"GenerationManager: Generating scene {scene.scene_id}: {seg_prompt}")
                 frames, new_latents, out_path, seed = video_engine.generate_frames(
-                    seg_request, 
+                    seg_request,
                     c_path,
                     temporal_state=temporal_state,
-                    scene_index=temporal_state.scene_index
+                    scene_index=temporal_state.scene_index,
+                    keyframe_latent=keyframe_latent,
                 )
-                
+
                 # Fallback object wrapping for compatibility with later stitching
                 from types import SimpleNamespace
                 seg_obj = SimpleNamespace(positive=seg_prompt, negative="", index=temporal_state.scene_index)
                 seg_frames.append((seg_obj, frames, out_path, seed))
-                
+
                 # Update Temporal State
                 if frames:
-                    with Image.open(frames[-1]) as img:
-                        temporal_state.previous_frame = img.copy().convert("RGB")
-                    temporal_state.previous_latent = new_latents
+                    last_frame = frames[-1]
+                    if isinstance(last_frame, str):
+                        with Image.open(last_frame) as img:
+                            temporal_state.previous_frame = img.copy().convert("RGB")
+                    else:
+                        temporal_state.previous_frame = last_frame.copy().convert("RGB")
+
+                    # Phase 15: persist global + previous latent for next scene
+                    # VideoEngine already returns CPU-detached tensors — no .cpu() needed
+                    temporal_state.previous_latent = new_latents  # already CPU
+                    temporal_state.global_latent = temporal_state.previous_latent
                     temporal_state.scene_index += 1
-                    
+
+                    ref_path = last_frame if isinstance(last_frame, str) else None
                     self._ctx.scene_memory.update(
-                        reference_frame_path=frames[-1],
+                        reference_frame_path=ref_path,
                         temporal_state=copy.deepcopy(temporal_state)
                     )
+
             # Final destruction of video engine
             video_engine._unload_model()
             video_engine = None
-            
+
             ModelLifecycle.enforce_cleanup("GenerationManager (VideoEngine > InterpolationEngine)")
+            ModelLifecycle.assert_vram_clean(threshold_gb=2.5, context="post-VideoEngine")
             if torch.cuda.is_available():
                 LOG.info(f"GenerationManager VRAM Log (Post-VideoBoot): {torch.cuda.memory_reserved()/1024**2:.0f} MB")
                     

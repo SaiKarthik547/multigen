@@ -63,8 +63,7 @@ class VideoEngine:
         self._out_dir.mkdir(parents=True, exist_ok=True)
         self.device = ctx.device
         self.pipe = None  # Ensure attribute exists even if load fails
-        from multigenai.consistency.ip_adapter_manager import IPAdapterManager
-        self.ip_adapter_manager = IPAdapterManager(self.device)
+        # Phase 15: IP-Adapter retired — no manager object needed
 
     def _load_model(self, use_ip_adapter: bool = False) -> None:
         """
@@ -98,12 +97,12 @@ class VideoEngine:
                 torch.cuda.ipc_collect()
 
             if self._ctx.settings.video.enable_ip_adapter and use_ip_adapter:
-                LOG.info("VideoEngine: Loading IP-Adapter for visual conditioning (SD1.5)...")
-                self.ip_adapter_manager.load(self.pipe, model_type="sd15")
-                # Phase 12 Fix: Increase influence for character stability
-                if hasattr(self.pipe, "set_ip_adapter_scale"):
-                    self.pipe.set_ip_adapter_scale(0.8)
-                    LOG.info("VideoEngine: IP-Adapter scale set to 0.8")
+                # Phase 15: IP-Adapter is retired — raise immediately to surface misconfiguration
+                raise RuntimeError(
+                    "IP-Adapter is retired (Phase 15 VRAM guard). "
+                    "Set enable_ip_adapter: false in config.yaml. "
+                    "See legacy/models/ip_adapter/ip_adapter_manager.py"
+                )
                 
         except Exception as e:
             LOG.error(f"Failed to load AnimateDiff pipeline: {e}")
@@ -165,26 +164,31 @@ class VideoEngine:
         seed: int,
         num_frames: int,
         temporal_state: "TemporalState",
-        scene_index: int = 0
+        scene_index: int = 0,
+        keyframe_latent: Optional[torch.Tensor] = None,
     ) -> tuple[List["PILImage"], torch.Tensor]:
         """
-        Executes AnimateDiff generation with Temporal Sliding Windowing.
-        
-        Phase 12 Strategy:
-        - Window 1 → frames 0-15
-        - Window 2 → frames 12-27
-        - Overlap → 4 frames
+        Executes AnimateDiff generation with Phase 15 Temporal Sliding Windowing.
+
+        Phase 15 Strategy:
+        - Window 1 → frames 0-23   (WINDOW_SIZE=24)
+        - Window 2 → frames 16-39  (OVERLAP=8)
+        - Latent seeded from keyframe anchor (not random) when available
+        - Directional velocity propagation between windows
         """
         from PIL import Image
         from multigenai.creative.scene_designer import SceneDesigner
         from multigenai.creative.prompt_compiler import PromptCompiler
-        
+
+        WINDOW_SIZE = 24  # Phase 15 upgrade from 16
+        OVERLAP = 8       # Phase 15 upgrade from 4
+
         inference_steps = request.num_inference_steps if request.num_inference_steps > 0 else 25
-        
-        # Phase 13: Integrated SceneDesigner for trajectory and motion tokens
+
+        # SceneDesigner: builds enriched prompt with camera + motion tokens
         blueprint = SceneDesigner().design_video(request, scene_index=scene_index)
         motion_prompt, negative_prompt = PromptCompiler().compile(blueprint, "animatediff")
-        
+
         # Base kwargs
         pipe_kwargs = {
             "prompt": motion_prompt,
@@ -194,138 +198,174 @@ class VideoEngine:
             "width": 768,
             "height": 512,
         }
-        
+
         if self._ctx.settings.video.enable_ip_adapter:
             pipe_kwargs["ip_adapter_image"] = conditioning_image
 
+        # Anchor trajectory encoder to first frame when available
         if scene_index == 0 and conditioning_image is not None and getattr(temporal_state, "previous_frame", None) is None:
-            # Phase 14 Runtime Fix: Inject exact initialization geometry into trajectory bounds.
             temporal_state.previous_frame = conditioning_image
 
-        LOG.info(f"VideoEngine: Generating 2x16 frame windows with 4-frame overlap (Phase 13)...")
-        
+        LOG.info(f"VideoEngine: Generating 2x{WINDOW_SIZE} frame windows with {OVERLAP}-frame overlap (Phase 15)...")
+
         device_type = "cuda" if self.device == "cuda" else "cpu"
         with torch.inference_mode(), torch.autocast(device_type):
             from multigenai.temporal.latent_propagator import LatentPropagator
+            import torch.nn.functional as F
+
             propagator = LatentPropagator()
 
-            # Phase 14: Identity-Latent Conditioning Initialization
+            # Phase 15 latent shape: 24 frames
             shape = (
-                1, 
-                self.pipe.unet.config.in_channels, 
-                16, 
-                512 // self.pipe.vae_scale_factor, 
-                768 // self.pipe.vae_scale_factor
+                1,
+                self.pipe.unet.config.in_channels,
+                WINDOW_SIZE,
+                512 // self.pipe.vae_scale_factor,
+                768 // self.pipe.vae_scale_factor,
             )
+            H, W = shape[3], shape[4]
             base_generator = torch.Generator(device=self.device).manual_seed(seed + scene_index)
-            
-            if hasattr(temporal_state, "identity_latent") and temporal_state.identity_latent is not None:
+
+            # ----------------------------------------------------------------
+            # Phase 15: Latent initialization priority chain
+            # 1. Keyframe anchor latent (highest priority — from SDXL keyframe)
+            # 2. Identity + previous scene latent blend
+            # 3. Pure random (no prior context)
+            # ----------------------------------------------------------------
+            if keyframe_latent is not None:
+                kf = keyframe_latent.to(self.device, dtype=self.pipe.dtype)
+                if kf.shape[1] != self.pipe.unet.config.in_channels:
+                    raise ValueError(
+                        f"Keyframe latent channel mismatch: "
+                        f"expected {self.pipe.unet.config.in_channels}, got {kf.shape[1]}"
+                    )
+                if kf.shape[2:] != (H, W):
+                    kf = F.interpolate(kf, size=(H, W), mode="bilinear", align_corners=False)
+                # Expand keyframe to full temporal window
+                latents = kf.unsqueeze(2).repeat(1, 1, WINDOW_SIZE, 1, 1)
+                LOG.debug("VideoEngine: Latent seeded from keyframe anchor.")
+
+            elif hasattr(temporal_state, "identity_latent") and temporal_state.identity_latent is not None:
                 id_lat = temporal_state.identity_latent.to(self.device, dtype=self.pipe.dtype)
-                assert id_lat.shape[1] == self.pipe.unet.config.in_channels, \
-                    f"Latent channel mismatch! Expected {self.pipe.unet.config.in_channels}, got {id_lat.shape[1]}"
-                
-                # Phase 14 Runtime Fix: Spatial Resizing (SDXL anchor 1024 -> AnimateDiff 768)
-                import torch.nn.functional as F
-                if id_lat.shape[2:] != (shape[3], shape[4]):
-                    id_lat = F.interpolate(id_lat, size=(shape[3], shape[4]), mode="bilinear", align_corners=False)
-                    
-                id_lat = id_lat.unsqueeze(2).repeat(1, 1, 16, 1, 1)
-                
+                if id_lat.shape[2:] != (H, W):
+                    id_lat = F.interpolate(id_lat, size=(H, W), mode="bilinear", align_corners=False)
+                id_lat = id_lat.unsqueeze(2).repeat(1, 1, WINDOW_SIZE, 1, 1)
+
                 if temporal_state.previous_latent is None:
                     latents = id_lat.clone()
+                elif scene_index > 0 and scene_index % 3 == 0:
+                    latents = id_lat.clone()
                 else:
-                    if scene_index > 0 and scene_index % 3 == 0:
-                        latents = id_lat.clone()
+                    prev_lat = temporal_state.previous_latent.to(self.device, dtype=self.pipe.dtype)
+
+                    # Trajectory: pull structure from previous frame
+                    traj_lat = None
+                    if getattr(temporal_state, "previous_frame", None) is not None:
+                        try:
+                            from multigenai.temporal.trajectory_encoder import TrajectoryEncoder
+                            traj_lat = TrajectoryEncoder().encode(self.pipe, temporal_state.previous_frame)
+                            if traj_lat is not None:
+                                traj_lat = traj_lat.to(self.device, dtype=self.pipe.dtype)
+                                if traj_lat.shape[2:] != (H, W):
+                                    traj_lat = F.interpolate(traj_lat, size=(H, W), mode="bilinear", align_corners=False)
+                                traj_lat = traj_lat.unsqueeze(2).repeat(1, 1, WINDOW_SIZE, 1, 1)
+                        except Exception as e:
+                            LOG.warning(f"Failed to encode trajectory latent: {e}")
+
+                    if traj_lat is not None:
+                        latents = (prev_lat * 0.6) + (id_lat * 0.25) + (traj_lat * 0.15)
                     else:
-                        prev_lat = temporal_state.previous_latent.to(self.device, dtype=self.pipe.dtype)
-                        
-                        traj_lat = None
-                        if getattr(temporal_state, "previous_frame", None) is not None:
-                            try:
-                                from multigenai.temporal.trajectory_encoder import TrajectoryEncoder
-                                traj_lat = TrajectoryEncoder().encode(self.pipe, temporal_state.previous_frame)
-                                if traj_lat is not None:
-                                    traj_lat = traj_lat.to(self.device, dtype=self.pipe.dtype)
-                                    # Phase 14: Spatial alignment for trajectory maps
-                                    import torch.nn.functional as F
-                                    if traj_lat.shape[2:] != (shape[3], shape[4]):
-                                        traj_lat = F.interpolate(traj_lat, size=(shape[3], shape[4]), mode="bilinear", align_corners=False)
-                                    traj_lat = traj_lat.unsqueeze(2).repeat(1, 1, 16, 1, 1)
-                            except Exception as e:
-                                LOG.warning(f"Failed to encode trajectory latent: {e}")
-                                
-                        if traj_lat is not None:
-                            latents = (prev_lat * 0.6) + (id_lat * 0.25) + (traj_lat * 0.15)
-                        else:
-                            latents = (prev_lat * 0.7) + (id_lat * 0.3)
-                
-                # Structural variance initialization
-                latents = propagator.propagate(latents, drift=0.015, generator=base_generator)
-                latents = torch.clamp(latents, -4.0, 4.0)
+                        latents = (prev_lat * 0.7) + (id_lat * 0.3)
+
+                # Apply directional propagation
+                latents, velocity = propagator.propagate(
+                    latents,
+                    prev_latent=temporal_state.previous_latent.to(self.device, dtype=self.pipe.dtype)
+                    if temporal_state.previous_latent is not None else None,
+                    velocity=temporal_state.latent_velocity.to(self.device, dtype=self.pipe.dtype)
+                    if temporal_state.latent_velocity is not None else None,
+                )
+                temporal_state.latent_velocity = velocity.cpu() if velocity is not None else None
             else:
                 latents = torch.randn(shape, generator=base_generator, device=self.device, dtype=self.pipe.dtype)
-            
-            # --- WINDOW 1 (0-15) ---
-            pipe_kwargs["num_frames"] = 16
+
+            latents = torch.clamp(latents, -4.0, 4.0)
+
+            # --- WINDOW 1 (frames 0 → WINDOW_SIZE-1) ---
+            pipe_kwargs["num_frames"] = WINDOW_SIZE
             pipe_kwargs["latents"] = latents.clone()
-            
+
             if "image" in self.pipe.__call__.__code__.co_varnames:
                 pipe_kwargs["image"] = conditioning_image
                 pipe_kwargs["strength"] = 0.75
-                
+
             res1_raw = self.pipe(**pipe_kwargs).frames
             res1 = res1_raw[0] if isinstance(res1_raw[0], list) else res1_raw
-            
-            # --- WINDOW 2 (12-27) - 4 frame overlap ---
-            # Phase 14 Fix: Properly shift 16-frame sliding latency bounds by pulling back 4 frames
+
+            # --- WINDOW 2 (OVERLAP frames carryover + fresh noise) ---
+            # Carry the LAST OVERLAP frames of window 1 as warm start, append fresh noise
+            # BUG FIX: was latents[:, :, OVERLAP:] (drops first frames) → must be [:, :, -OVERLAP:]
+            fresh_frames = WINDOW_SIZE - OVERLAP  # 16 frames of fresh noise
             new_noise = torch.randn(
-                (1, self.pipe.unet.config.in_channels, 12, shape[3], shape[4]),
-                generator=base_generator, device=self.device, dtype=self.pipe.dtype
+                (1, self.pipe.unet.config.in_channels, fresh_frames, H, W),
+                generator=base_generator, device=self.device, dtype=self.pipe.dtype,
             )
-            
-            latents_w2 = torch.cat([latents[:, :, 12:], new_noise], dim=2)
-            latents_w2 = propagator.propagate(latents_w2, drift=0.015, generator=base_generator)
+            latents_w2 = torch.cat([latents[:, :, -OVERLAP:], new_noise], dim=2)
+
+            # Apply directional propagation for window 2
+            latents_w2, _ = propagator.propagate(
+                latents_w2,
+                prev_latent=latents,
+                velocity=temporal_state.latent_velocity.to(self.device, dtype=self.pipe.dtype)
+                if temporal_state.latent_velocity is not None else None,
+            )
             latents_w2 = torch.clamp(latents_w2, -4.0, 4.0)
-            
+
             pipe_kwargs["latents"] = latents_w2
-            
             if "image" in self.pipe.__call__.__code__.co_varnames:
-                pipe_kwargs["image"] = res1[-1]  # Anchor to Window 1 end
-                pipe_kwargs["strength"] = 0.6    # Preserve character, allow motion
-            
+                pipe_kwargs["image"] = res1[-1]   # anchor to last frame of W1
+                pipe_kwargs["strength"] = 0.6
+
             res2_raw = self.pipe(**pipe_kwargs).frames
             res2 = res2_raw[0] if isinstance(res2_raw[0], list) else res2_raw
-            
-        # Linear Temporal Blending (4-frame overlap)
+
+        # --- Linear temporal blending over OVERLAP frames ---
         final_frames = []
-        # 1. First 12 frames from Window 1
-        final_frames.extend(res1[:12])
-        
-        # 2. Middle 4 frames: Blended
-        for i in range(4):
-            alpha = (i + 1) / 5.0 # Linear ramp
-            blended = Image.blend(res1[12+i], res2[i], alpha)
+        final_frames.extend(res1[:WINDOW_SIZE - OVERLAP])          # 16 clean frames from W1
+
+        for i in range(OVERLAP):
+            alpha = (i + 1) / (OVERLAP + 1)                        # linear ramp
+            blended = Image.blend(res1[WINDOW_SIZE - OVERLAP + i], res2[i], alpha)
             final_frames.append(blended)
-            
-        # 3. Last 12 frames from Window 2
-        final_frames.extend(res2[4:])
-        
+
+        final_frames.extend(res2[OVERLAP:])                        # 16 clean frames from W2
+
         del res1
         del res2
         gc.collect()
-        
-        LOG.info(f"VideoEngine: Windowing complete. Result length: {len(final_frames)}")
-        return final_frames, latents
+
+        LOG.info(f"VideoEngine: Windowing complete. Frames: {len(final_frames)}")
+
+        # Persist global_latent on CPU (before latents go out of scope or get .cpu() called externally)
+        temporal_state.global_latent = latents.detach().cpu()
+
+        return final_frames, latents.detach().cpu()
 
     def generate_frames(
         self,
         request: "VideoGenerationRequest",
         conditioning_image_path: str,
         temporal_state: "TemporalState",
-        scene_index: int = 0
+        scene_index: int = 0,
+        keyframe_latent: Optional[torch.Tensor] = None,
     ) -> tuple[List["PILImage"], Optional[torch.Tensor], pathlib.Path, int]:
         """
-        Run AnimateDiff generation and return (frames, None, out_path, seed).
+        Run AnimateDiff generation and return (frame_paths, final_latents, out_path, seed).
+
+        Args:
+            keyframe_latent: Optional pre-encoded latent from SDXL keyframe anchor.
+                             When provided seeds the AnimateDiff latent space for
+                             strong composition + character consistency.
         """
         from multigenai.engines.image_engine.engine import _slug
 
@@ -337,16 +377,13 @@ class VideoEngine:
             torch.randint(0, 1_000_000, (1,)).item()
         )
 
-        # AnimateDiff usually takes 16-24 frames. 
-        # User requested 3 scenes x 24 frames.
-        effective_frames = 24 
+        effective_frames = 24  # Phase 15: matches WINDOW_SIZE
 
         from PIL import Image as PILImage, ImageOps
         init_image = None
         if conditioning_image_path is not None:
-            LOG.debug(f"Loading conditioning image (if needed): {conditioning_image_path}")
+            LOG.debug(f"Loading conditioning image: {conditioning_image_path}")
             init_image = PILImage.open(conditioning_image_path).convert("RGB")
-            # ISSUE 7 Fix: Use ImageOps.fit to preserve aspect ratio (Phase 13: 768x512)
             request.width = 768
             request.height = 512
             init_image = ImageOps.fit(init_image, (request.width, request.height), method=PILImage.Resampling.LANCZOS)
@@ -355,14 +392,15 @@ class VideoEngine:
 
         try:
             frames, final_latents = self._generate_video(
-                request, 
-                init_image, 
-                seed, 
+                request,
+                init_image,
+                seed,
                 effective_frames,
                 temporal_state=temporal_state,
-                scene_index=scene_index
+                scene_index=scene_index,
+                keyframe_latent=keyframe_latent,
             )
-            
+
             # Disk Streaming Cache
             temp_session_dir = self._out_dir / f".temp_frames_{seed}"
             temp_session_dir.mkdir(parents=True, exist_ok=True)

@@ -81,3 +81,33 @@ class ModelLifecycle:
             pass
         except Exception as exc:
             LOG.warning(f"ModelLifecycle: CUDA flush error [{context}]: {exc}")
+
+    @staticmethod
+    def assert_vram_clean(threshold_gb: float = 1.5, context: str = "system") -> None:
+        """
+        Phase 15 Health Guard: Raise RuntimeError if reserved VRAM exceeds threshold.
+
+        Call after every hard unload to immediately surface memory leaks rather
+        than allowing them to accumulate silently and cause OOM mid-generation.
+
+        Args:
+            threshold_gb: Maximum acceptable reserved VRAM in GB (default 1.5).
+            context:      Label for the error/log message.
+
+        Raises:
+            RuntimeError: if reserved VRAM > threshold_gb.
+        """
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                return
+            reserved_gb = torch.cuda.memory_reserved() / 1024 ** 3
+            if reserved_gb > threshold_gb:
+                raise RuntimeError(
+                    f"VRAM leak detected [{context}]: "
+                    f"{reserved_gb:.2f} GB reserved > {threshold_gb:.1f} GB threshold. "
+                    "Abort to prevent OOM."
+                )
+            LOG.debug(f"ModelLifecycle: VRAM clean [{context}] — {reserved_gb:.2f} GB reserved.")
+        except ImportError:
+            pass

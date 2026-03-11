@@ -47,11 +47,18 @@ class SceneDescriptor:
     """
     scene_id: str
     description: str
-    characters: List[str] = field(default_factory=list)
+    characters: list = None
     location: str = "unspecified"
     time_of_day: str = "noon"
     duration_hint: float = 3.0
     notes: str = ""
+    keyframe_prompt: str = ""   # Phase 15: used for keyframe anchor generation
+    motion_prompt: str = ""     # Phase 15: camera / motion description for AnimateDiff
+    keyframe_path: str = ""     # Phase 15: path to the generated keyframe anchor image
+
+    def __post_init__(self):
+        if self.characters is None:
+            self.characters = []
 
 @dataclass
 class VideoGenerationPlan:
@@ -161,7 +168,7 @@ class ScenePlanner:
         Returns:
             VideoGenerationPlan containing the ordered scenes and metadata.
         """
-        MAX_SCENES = 6
+        MAX_SCENES = 7  # Phase 15: raised to 7 for richer multi-scene generation
         scenes = []
         
         if self._provider is not None:

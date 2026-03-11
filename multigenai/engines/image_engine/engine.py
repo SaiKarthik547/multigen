@@ -156,39 +156,30 @@ class ImageEngine:
         repo_id = self._resolve_model_name(model_name)
         is_xl = "xl" in repo_id.lower()
 
+        # Phase 15: ControlNet and IP-Adapter are retired (VRAM guard)
+        if use_controlnet:
+            raise RuntimeError(
+                "ControlNet is retired in Phase 15 to stay within Kaggle T4 VRAM budget. "
+                "Set use_controlnet=False. See legacy/models/controlnet/."
+            )
+        if use_ip_adapter:
+            raise RuntimeError(
+                "IP-Adapter is retired in Phase 15 to stay within Kaggle T4 VRAM budget. "
+                "Set use_ip_adapter=False. See legacy/models/ip_adapter/."
+            )
+
         if self.pipe is not None:
-            if (
-                self._controlnet_enabled != use_controlnet
-                or self._ip_adapter_enabled != use_ip_adapter
-            ):
-                from multigenai.core.model_lifecycle import ModelLifecycle
-                LOG.info("Pipeline configuration changed. Reloading model.")
-                ModelLifecycle.safe_unload(self.pipe)
-                self.pipe = None
-            else:
-                return  # Model is correctly cached
+            return  # Model is correctly cached — no config change possible (both flags always False)
 
         if is_xl:
-            if use_controlnet:
-                from diffusers import StableDiffusionXLControlNetPipeline
-                LOG.info(f"Loading SDXL ControlNet Base model {repo_id} (fp16)...")
-                self.controlnet_manager.load() 
-                self.pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
-                    repo_id,
-                    controlnet=self.controlnet_manager.controlnet,
-                    torch_dtype=torch.float16,
-                    variant="fp16",
-                    use_safetensors=True,
-                )
-            else:
-                from diffusers import StableDiffusionXLPipeline
-                LOG.info(f"Loading SDXL model {repo_id} (fp16)...")
-                self.pipe = StableDiffusionXLPipeline.from_pretrained(
-                    repo_id,
-                    torch_dtype=torch.float16,
-                    variant="fp16",
-                    use_safetensors=True,
-                )
+            from diffusers import StableDiffusionXLPipeline
+            LOG.info(f"Loading SDXL model {repo_id} (fp16)...")
+            self.pipe = StableDiffusionXLPipeline.from_pretrained(
+                repo_id,
+                torch_dtype=torch.float16,
+                variant="fp16",
+                use_safetensors=True,
+            )
         else:
             from diffusers import StableDiffusionPipeline
             LOG.info(f"Loading SD 1.x model {repo_id} (fp16)...")
@@ -198,16 +189,11 @@ class ImageEngine:
                 use_safetensors=True,
             )
 
-        # Apply IP-Adapter weights to pipeline if requested
-        if use_ip_adapter:
-            model_type = "sdxl" if is_xl else "sd15"
-            self.ip_adapter_manager.load(self.pipe, model_type=model_type)
+        # Apply memory optimizations (ControlNet / IP-Adapter paths removed)
+        self.pipe = _apply_memory_optimizations(self.pipe, self.device, use_ip_adapter=False)
 
-        # --- Apply unified memory optimizations ---
-        self.pipe = _apply_memory_optimizations(self.pipe, self.device, use_ip_adapter=use_ip_adapter)
-            
-        self._controlnet_enabled = use_controlnet
-        self._ip_adapter_enabled = use_ip_adapter
+        self._controlnet_enabled = False
+        self._ip_adapter_enabled = False
 
     def _generate(
         self,
@@ -247,18 +233,18 @@ class ImageEngine:
         }
 
         if control_image is not None:
-            # Generate depth map for structural conditioning
-            kwargs["image"] = self.controlnet_manager.get_depth_map(control_image)
-            
+            # Phase 15: ControlNet is retired. Log and skip depth-map conditioning.
+            LOG.warning(
+                "ImageEngine: control_image provided but ControlNet is retired (Phase 15). "
+                "Ignoring depth conditioning."
+            )
+
         if ref_image is not None:
-            kwargs["ip_adapter_image"] = ref_image
-            
-        # --- Normalize IP Adapter input ---
-        if "ip_adapter_image" in kwargs:
-            ip_img = kwargs["ip_adapter_image"]
-            if isinstance(ip_img, (list,tuple)):
-                ip_img = list(ip_img)
-            kwargs["ip_adapter_image"] = ip_img
+            # Phase 15: IP-Adapter is retired. ref_image is intentionally ignored.
+            LOG.warning(
+                "ImageEngine: ref_image provided but IP-Adapter is retired (Phase 15). "
+                "Identity conditioning via IdentityLatentEncoder is used instead."
+            )
 
         # --- Normalize ControlNet image ---
         if "image" in kwargs:

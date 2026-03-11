@@ -1,27 +1,20 @@
 """
-ControlNetManager — Phase 4 stub.
+ControlNetManager — Phase 15 Retired Stub.
 
-Phase 4 will implement:
-  - Depth map extraction + ControlNet depth conditioning
-  - Segmentation conditioning
-  - Lighting embedding injection
+Original Phase 4 stub moved to legacy/models/controlnet/controlnet_manager_stub.py.
+This file kept here to preserve the control.__init__ import chain without crashing.
 """
 
 from __future__ import annotations
 
 
 class ControlNetManager:
-    """
-    Manages ControlNet model loading and conditioned image generation.
-
-    Phase 4 implementation will support:
-      - depth: MiDaS depth map → ControlNet depth
-      - seg: Segmentation mask → ControlNet seg
-      - pose: OpenPose keypoints → ControlNet pose
-    """
+    """Retired Phase 4 stub. See legacy/models/controlnet/."""
 
     SUPPORTED_TYPES = ("depth", "seg", "pose", "canny")
 
     def apply(self, image, control_type: str = "depth"):
-        """[Phase 4] Apply ControlNet conditioning to a generation pipeline."""
-        raise NotImplementedError(f"ControlNet '{control_type}' activates in Phase 4.")
+        raise NotImplementedError(
+            "ControlNet is retired (Phase 15 VRAM guard). "
+            "See legacy/models/controlnet/controlnet_manager_stub.py"
+        )
