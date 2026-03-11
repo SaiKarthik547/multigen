@@ -521,6 +521,18 @@ class GenerationManager:
             if interp_engine:
                 ModelLifecycle.safe_unload(interp_engine)
 
+            # Phase 16: Ensure all temp frame directories are fully swept from disk.
+            # VideoEngine cleans the direct sequence it's fed, but if InterpolationEngine
+            # was used, the raw `.temp_frames_` are orphaned on disk!
+            import shutil
+            for _, f_list, _, _ in seg_frames:
+                if f_list and isinstance(f_list[0], (str, pathlib.Path)):
+                    p = pathlib.Path(f_list[0])
+                    temp_dir = next((pathlib.Path(*p.parts[:i+1]) for i, part in enumerate(p.parts) if ".temp_frames_" in part or ".interpolated_frames" in part), None)
+                    if temp_dir is not None:
+                        try: shutil.rmtree(temp_dir)
+                        except: pass
+
         # Return the first successful result (or last attempt error info)
         for r in results:
             if r.success:

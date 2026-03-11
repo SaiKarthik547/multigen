@@ -505,8 +505,10 @@ class VideoEngine:
             # Cleanup temp session
             if frames and isinstance(frames[0], (str, pathlib.Path)):
                 p = pathlib.Path(frames[0])
-                if ".temp_frames_" in p.parent.name:
-                    try: shutil.rmtree(p.parent)
+                # Find the actual .temp_frames_ or .interpolated_frames parent directory
+                temp_dir = next((pathlib.Path(*p.parts[:i+1]) for i, part in enumerate(p.parts) if ".temp_frames_" in part or ".interpolated_frames" in part), None)
+                if temp_dir is not None:
+                    try: shutil.rmtree(temp_dir)
                     except: pass
 
             return VideoResult(
