@@ -375,7 +375,7 @@ class GenerationManager:
                         total_frame_count = 0
 
                     last_frame = frames[-1]
-                    if isinstance(last_frame, str):
+                    if isinstance(last_frame, (str, pathlib.Path)):
                         with Image.open(last_frame) as img:
                             temporal_state.previous_frame = img.copy().convert("RGB")
                     else:
@@ -393,7 +393,7 @@ class GenerationManager:
 
                     temporal_state.scene_index += 1
 
-                    ref_path = last_frame if isinstance(last_frame, str) else None
+                    ref_path = str(last_frame) if isinstance(last_frame, (str, pathlib.Path)) else None
                     self._ctx.scene_memory.update(
                         reference_frame_path=ref_path,
                         temporal_state=copy.deepcopy(temporal_state)

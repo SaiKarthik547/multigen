@@ -9,6 +9,7 @@ class TestIdentityLatentEncoder:
         # Arrange
         mock_pipe = MagicMock()
         mock_pipe.device = torch.device("cpu")
+        mock_pipe._execution_device = torch.device("cpu")
         mock_pipe.dtype = torch.float32
         mock_pipe.vae.config.scaling_factor = 0.18215
         # Ensure parameters() doesn't return an infinite Mock iterator

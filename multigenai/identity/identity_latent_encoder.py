@@ -38,11 +38,12 @@ class IdentityLatentEncoder:
             torch.Tensor: Latent [1, C, H/8, W/8] scaled by VAE scaling_factor,
                           on the same device as the VAE weights, detached from graph.
         """
-        # Resolve the real VAE device (may differ from pipe.device when offloaded)
-        try:
-            vae_device = next(pipe.vae.parameters()).device
-        except (StopIteration, AttributeError):
-            vae_device = getattr(pipe, "device", torch.device("cpu"))
+        # Resolve the real execution device. Diffusers pipelines with CPU offloading
+        # will report module parameters as "cpu" while resting, but execute on "cuda".
+        # pipe._execution_device is the official, safe property.
+        vae_device = getattr(pipe, "_execution_device", getattr(pipe, "device", None))
+        if vae_device is None:
+            vae_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Preprocess PIL → normalised tensor [-1, 1] using diffusers processor
         image_tensor = pipe.image_processor.preprocess(image)
