@@ -56,5 +56,6 @@ class IdentityLatentEncoder:
 
         # Scale by the exact VAE scaling factor requested
         latent = latent * 0.18215
+        latent = latent.detach()
 
-        return latent.detach()
+        return latent

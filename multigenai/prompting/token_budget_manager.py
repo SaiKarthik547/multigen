@@ -25,9 +25,9 @@ from typing import List
 # ---------------------------------------------------------------------------
 # Default budget constants (overridden by PromptSettings at runtime)
 # ---------------------------------------------------------------------------
-_DEFAULT_MAX_TOKENS: int = 55         # Phase D: CLI token overflow fix
-_DEFAULT_NEG_RESERVE: int = 32        # tokens reserved for negative prompt
-_DEFAULT_POS_BUDGET: int = _DEFAULT_MAX_TOKENS - _DEFAULT_NEG_RESERVE  # 55
+_DEFAULT_MAX_TOKENS: int = 60         # Phase D: CLI token overflow fix
+_DEFAULT_NEG_RESERVE: int = 20        # tokens reserved for negative prompt
+_DEFAULT_POS_BUDGET: int = _DEFAULT_MAX_TOKENS - _DEFAULT_NEG_RESERVE  # 40
 
 
 @dataclass(frozen=True)

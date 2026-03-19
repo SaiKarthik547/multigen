@@ -96,4 +96,6 @@ class LatentPropagator:
         """Phase F Temporal smoothing to reduce pose jitter."""
         if prev is None:
             return latent
-        return 0.85 * latent + 0.15 * prev
+        latents = 0.85 * latent + 0.15 * prev
+        latents = latents.clamp(-4.0, 4.0)
+        return latents

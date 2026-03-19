@@ -164,6 +164,8 @@ class VideoEngine:
 
         B, C, T, H, W = latents.shape
 
+        latents = latents.clamp(-4.0, 4.0)
+
         # correct scaling for AnimateDiff pipeline
         latents = latents / 0.18215
 
@@ -269,6 +271,7 @@ class VideoEngine:
                     kf = F.interpolate(kf, size=(H, W), mode="bilinear", align_corners=False)
                 # Expand keyframe to full temporal window
                 latents = kf.unsqueeze(2).repeat(1, 1, WINDOW_SIZE, 1, 1)
+                latents[:, :, 0] = kf
                 LOG.debug("VideoEngine: Latent seeded from keyframe anchor.")
 
             elif hasattr(temporal_state, "identity_latent") and temporal_state.identity_latent is not None:
