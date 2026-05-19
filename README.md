@@ -928,7 +928,7 @@ sdxl:
 
 ```bash
 # 1. Clone
-git clone https://github.com/your-username/multigen.git
+git clone https://github.com/SaiKarthik547/multigen
 cd multigen
 
 # 2. Create virtual environment
