@@ -112,11 +112,17 @@ class AudioEngine:
         self.bundle = self.registry.get(model_id, environment=self._ctx.environment)
 
     def _unload_model(self) -> None:
-        """Flushes VRAM."""
+        """Release the MMAudio bundle and return VRAM to the allocator.
+
+        P0-C ownership contract: `self.bundle` is nulled before the registry
+        teardown runs its gc/CUDA sweep, otherwise the engine keeps the models
+        reachable and VRAM is never returned to the allocator.
+        """
+        from multigenai.core.model_lifecycle import ModelLifecycle
+
+        self.bundle = None
         self.registry.unload("mmaudio_cinematic")
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        ModelLifecycle.enforce_cleanup("AudioEngine._unload_model")
 
     def run(self, request: "AudioGenerationRequest") -> AudioResult:
         """
@@ -185,7 +191,7 @@ class AudioEngine:
             out_path = self._out_dir / f"audio_{int(torch.randint(0, 1000, (1,)).item())}.wav"
             wavfile.write(str(out_path), 16000, (audio_np * 32767).astype(np.int16))
             
-            if self._ctx.settings.audio.auto_unload:
+            if self._ctx.behaviour.auto_unload_after_gen:
                 self._unload_model()
                 
             return AudioResult(

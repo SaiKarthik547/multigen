@@ -8,7 +8,7 @@ Phase 2: LLM-driven structured breakdown using structured_generate()
 Design rules:
   - LLM path uses structured_generate() with a JSON schema — deterministic
   - Falls back to heuristic split on any LLM failure
-  - Prmultigenaider injected via constructor (DI)
+  - Provider injected via constructor (DI)
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from multigenai.core.logging.logger import get_logger
 
 if TYPE_CHECKING:
-    from multigenai.llm.prmultigenaiders.base import LLMPrmultigenaider
+    from multigenai.llm.providers.base import LLMProvider
 
 LOG = get_logger(__name__)
 
@@ -126,7 +126,7 @@ class ScenePlanner:
     """
     Splits a narrative script into a sequence of SceneDescriptors.
 
-    When a LLMPrmultigenaider is injected, uses structured_generate() for
+    When a LLMProvider is injected, uses structured_generate() for
     rich, character-aware scene breakdown. Falls back to heuristic
     sentence-splitting on any LLM failure.
 
@@ -135,7 +135,7 @@ class ScenePlanner:
         scenes = planner.plan("A knight rides through a forest. He finds a sword.")
 
     Usage (LLM-backed):
-        planner = ScenePlanner(prmultigenaider=ctx.llm)
+        planner = ScenePlanner(provider=ctx.llm)
         scenes = planner.plan("A knight rides through a forest. He finds a sword.")
     """
 
@@ -149,14 +149,14 @@ class ScenePlanner:
         "night": ["night", "dark", "midnight", "evening"],
     }
 
-    def __init__(self, prmultigenaider: Optional["LLMPrmultigenaider"] = None) -> None:
+    def __init__(self, provider: Optional["LLMProvider"] = None) -> None:
         """
         Args:
-            prmultigenaider: Optional LLM backend. If None, heuristic path is used.
+            provider: Optional LLM backend. If None, heuristic path is used.
         """
-        self._prmultigenaider = prmultigenaider
-        if prmultigenaider:
-            LOG.debug(f"ScenePlanner: LLM prmultigenaider set ({type(prmultigenaider).__name__})")
+        self._provider = provider
+        if provider:
+            LOG.debug(f"ScenePlanner: LLM provider set ({type(provider).__name__})")
 
     # ------------------------------------------------------------------
     # Public API
@@ -166,7 +166,7 @@ class ScenePlanner:
         """
         Parse a script string into a structured VideoGenerationPlan.
 
-        Routes to plan_with_llm() when a prmultigenaider is set; falls back to
+        Routes to plan_with_llm() when a provider is set; falls back to
         heuristic splitting on failure.
 
         Args:
@@ -179,7 +179,7 @@ class ScenePlanner:
         MAX_SCENES = 7  # Phase 15: raised to 7 for richer multi-scene generation
         scenes = []
         
-        if self._prmultigenaider is not None:
+        if self._provider is not None:
             try:
                 scenes = self.plan_with_llm(script, default_duration)
             except Exception as exc:
@@ -209,7 +209,7 @@ class ScenePlanner:
         LLM-driven structured scene planning.
 
         Uses structured_generate() with _SceneListResponse schema.
-        Malformed JSON / validation failure → PrmultigenaiderResponseFormatError
+        Malformed JSON / validation failure → ProviderResponseFormatError
         (caught by plan() and falls back to heuristic).
 
         Args:
@@ -220,14 +220,14 @@ class ScenePlanner:
             Ordered list of SceneDescriptor objects.
 
         Raises:
-            PrmultigenaiderResponseFormatError: if LLM output cannot be validated.
-            PrmultigenaiderUnavailableError: if prmultigenaider is unreachable.
+            ProviderResponseFormatError: if LLM output cannot be validated.
+            ProviderUnavailableError: if provider is unreachable.
         """
-        if self._prmultigenaider is None:
+        if self._provider is None:
             return self._heuristic_plan(script, default_duration)
 
         prompt = _SCENE_PLANNING_PROMPT_TEMPLATE.format(script=script)
-        result: _SceneListResponse = self._prmultigenaider.structured_generate(
+        result: _SceneListResponse = self._provider.structured_generate(
             prompt, schema=_SceneListResponse
         )
 

@@ -145,66 +145,66 @@ class IdentityEncoderError(MGOSError):
 
 
 # ---------------------------------------------------------------------------
-# LLM Prmultigenaider — scoped exception hierarchy
+# LLM Provider — scoped exception hierarchy
 # ---------------------------------------------------------------------------
 
-class PrmultigenaiderUnavailableError(MGOSError):
+class ProviderUnavailableError(MGOSError):
     """
     Base: LLM backend is unreachable or returned an unrecoverable error.
 
-    Catch this when you want to handle any prmultigenaider failure generically.
+    Catch this when you want to handle any provider failure generically.
     Use the subclasses for specific failure modes.
     """
 
 
-class PrmultigenaiderTimeoutError(PrmultigenaiderUnavailableError):
+class ProviderTimeoutError(ProviderUnavailableError):
     """
-    Raised when the LLM prmultigenaider does not respond within the configured timeout.
+    Raised when the LLM provider does not respond within the configured timeout.
 
     Maps to: requests.Timeout, socket.timeout
     """
 
     def __init__(self, endpoint: str, timeout_seconds: float) -> None:
         super().__init__(
-            f"LLM prmultigenaider timed out after {timeout_seconds}s: {endpoint}",
+            f"LLM provider timed out after {timeout_seconds}s: {endpoint}",
             details={"endpoint": endpoint, "timeout_seconds": timeout_seconds},
         )
         self.endpoint = endpoint
         self.timeout_seconds = timeout_seconds
 
 
-class PrmultigenaiderAuthError(PrmultigenaiderUnavailableError):
+class ProviderAuthError(ProviderUnavailableError):
     """
-    Raised when the LLM prmultigenaider returns HTTP 401 or 403.
+    Raised when the LLM provider returns HTTP 401 or 403.
 
     Usually means: missing or invalid API key in the MGOS_LLM_API_KEY env var.
     """
 
     def __init__(self, endpoint: str) -> None:
         super().__init__(
-            f"LLM prmultigenaider authentication failed: {endpoint}. "
+            f"LLM provider authentication failed: {endpoint}. "
             "Check your MGOS_LLM_API_KEY environment variable.",
             details={"endpoint": endpoint},
         )
         self.endpoint = endpoint
 
 
-class PrmultigenaiderResponseError(PrmultigenaiderUnavailableError):
+class ProviderResponseError(ProviderUnavailableError):
     """
-    Raised when the LLM prmultigenaider returns a non-auth HTTP error (4xx/5xx).
+    Raised when the LLM provider returns a non-auth HTTP error (4xx/5xx).
 
-    Distinct from PrmultigenaiderAuthError so retry logic can differentiate.
+    Distinct from ProviderAuthError so retry logic can differentiate.
     """
 
     def __init__(self, endpoint: str, status_code: int, body: str = "") -> None:
         super().__init__(
-            f"LLM prmultigenaider HTTP {status_code} from {endpoint}",
+            f"LLM provider HTTP {status_code} from {endpoint}",
             details={"endpoint": endpoint, "status_code": status_code, "body": body[:200]},
         )
         self.status_code = status_code
 
 
-class PrmultigenaiderResponseFormatError(PrmultigenaiderUnavailableError):
+class ProviderResponseFormatError(ProviderUnavailableError):
     """
     Raised when the LLM response cannot be parsed as valid JSON or fails
     schema validation, even after the retry/fix cycle.

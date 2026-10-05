@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from multigenai.core.device_manager import DeviceManager
     from multigenai.core.environment import EnvironmentProfile
     from multigenai.core.model_registry import ModelRegistry
-    from multigenai.llm.prmultigenaiders.base import LLMPrmultigenaider
+    from multigenai.llm.providers.base import LLMProvider
     from multigenai.memory.identity_store import IdentityStore
     from multigenai.memory.world_state import WorldStateEngine
     from multigenai.memory.style_registry import StyleRegistry
@@ -45,7 +45,7 @@ class ExecutionContext:
         style_registry:   Style profile registry.
         embedding_store:  Vector embedding store.
         capability:       Capability report data dict.
-        llm_prmultigenaider:     Optional LLM backend (None → rule-based fallback).
+        llm_provider:     Optional LLM backend (None → rule-based fallback).
         environment:      Detected EnvironmentProfile (platform, vram, behaviour).
         scene_memory:     Scene state for multi-segment generation (Phase 10).
     """
@@ -58,7 +58,7 @@ class ExecutionContext:
     style_registry: "StyleRegistry"
     embedding_store: "EmbeddingStore"
     capability: dict = field(default_factory=dict)
-    llm_prmultigenaider: Optional["LLMPrmultigenaider"] = field(default=None)
+    llm_provider: Optional["LLMProvider"] = field(default=None)
     environment: Optional["EnvironmentProfile"] = field(default=None)
     scene_memory: "SceneMemory" = field(default_factory=lambda: __import__('multigenai.consistency.scene_memory', fromlist=['SceneMemory']).SceneMemory())
 
@@ -67,9 +67,9 @@ class ExecutionContext:
     # ------------------------------------------------------------------
 
     @property
-    def llm(self) -> Optional["LLMPrmultigenaider"]:
-        """Alias for llm_prmultigenaider. Use this in engines and prompt layer."""
-        return self.llm_prmultigenaider
+    def llm(self) -> Optional["LLMProvider"]:
+        """Alias for llm_provider. Use this in engines and prompt layer."""
+        return self.llm_provider
 
     @property
     def behaviour(self):
@@ -91,9 +91,9 @@ class ExecutionContext:
         If settings is None, get_settings() is called automatically.
         This allows zero-arg usage: ExecutionContext.build()
 
-        LLM prmultigenaider is instantiated lazily inside a branch — only one
-        prmultigenaider module is ever imported per run. If instantiation fails
-        or llm.enabled is False, llm_prmultigenaider is set to None so callers
+        LLM provider is instantiated lazily inside a branch — only one
+        provider module is ever imported per run. If instantiation fails
+        or llm.enabled is False, llm_provider is set to None so callers
         fall back to rule-based logic.
 
         Args:
@@ -156,20 +156,20 @@ class ExecutionContext:
         dm = DeviceManager(preferred=settings.device)
         cap = CapabilityReport().to_dict()
 
-        # Lazy branch import — only the chosen prmultigenaider module is imported
-        llm_prmultigenaider: Optional["LLMPrmultigenaider"] = None
+        # Lazy branch import — only the chosen provider module is imported
+        llm_provider: Optional["LLMProvider"] = None
         if settings.llm.enabled:
             try:
-                if settings.llm.prmultigenaider == "local":
-                    from multigenai.llm.prmultigenaiders.local_prmultigenaider import LocalLLMPrmultigenaider
-                    llm_prmultigenaider = LocalLLMPrmultigenaider(
+                if settings.llm.provider == "local":
+                    from multigenai.llm.providers.local_provider import LocalLLMProvider
+                    llm_provider = LocalLLMProvider(
                         model=settings.llm.model,
                         endpoint=settings.llm.endpoint,
                         timeout_seconds=settings.llm.timeout_seconds,
                     )
-                elif settings.llm.prmultigenaider == "api":
-                    from multigenai.llm.prmultigenaiders.api_prmultigenaider import APILLMPrmultigenaider
-                    llm_prmultigenaider = APILLMPrmultigenaider(
+                elif settings.llm.provider == "api":
+                    from multigenai.llm.providers.api_provider import APILLMProvider
+                    llm_provider = APILLMProvider(
                         api_mode=settings.llm.api_mode,
                         model=settings.llm.model,
                         api_key_env=settings.llm.api_key_env,
@@ -177,15 +177,15 @@ class ExecutionContext:
                     )
                 else:
                     LOG.warning(
-                        f"Unknown llm.prmultigenaider '{settings.llm.prmultigenaider}' — "
+                        f"Unknown llm.provider '{settings.llm.provider}' — "
                         "falling back to rule-based."
                     )
             except Exception as exc:
                 LOG.warning(
-                    f"LLM prmultigenaider instantiation failed ({exc}) — "
+                    f"LLM provider instantiation failed ({exc}) — "
                     "falling back to rule-based."
                 )
-                llm_prmultigenaider = None
+                llm_provider = None
 
         return cls(
             settings=settings,
@@ -197,6 +197,6 @@ class ExecutionContext:
             style_registry=StyleRegistry(store_dir=settings.memory.store_dir),
             embedding_store=EmbeddingStore(),
             capability=cap,
-            llm_prmultigenaider=llm_prmultigenaider,
+            llm_provider=llm_provider,
             environment=environment,
         )

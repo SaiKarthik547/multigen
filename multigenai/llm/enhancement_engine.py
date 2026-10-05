@@ -2,11 +2,11 @@
 EnhancementEngine — Prompt quality enhancement.
 
 Phase 1: Rule-based quality token injection (no LLM dependency).
-Phase 2: LLM-enhanced path via injected LLMPrmultigenaider (with permanent fallback).
+Phase 2: LLM-enhanced path via injected LLMProvider (with permanent fallback).
 
 Design rules:
   - LLM is NEVER mandatory — rule-based fallback always present
-  - Prmultigenaider injected via constructor (DI) — no global imports
+  - Provider injected via constructor (DI) — no global imports
   - Idempotence guaranted: quality markers never double-injected,
     even after LLM rewrites the prompt
 """
@@ -18,7 +18,7 @@ from typing import Optional, TYPE_CHECKING
 from multigenai.core.logging.logger import get_logger
 
 if TYPE_CHECKING:
-    from multigenai.llm.prmultigenaiders.base import LLMPrmultigenaider
+    from multigenai.llm.providers.base import LLMProvider
 
 LOG = get_logger(__name__)
 
@@ -48,9 +48,9 @@ class EnhancementEngine:
     """
     Enhances raw prompts with quality-boosting tokens.
 
-    When a LLMPrmultigenaider is injected, it rewrites the prompt for richness
+    When a LLMProvider is injected, it rewrites the prompt for richness
     before quality tokens are appended. Falls back to rule-based if
-    the prmultigenaider is unavailable or returns an error.
+    the provider is unavailable or returns an error.
 
     Idempotent: calling enhance() twice on the same prompt is safe.
 
@@ -59,20 +59,20 @@ class EnhancementEngine:
         better = engine.enhance("a lone knight in a forest")
 
     Usage (LLM-backed):
-        engine = EnhancementEngine(prmultigenaider=ctx.llm)
+        engine = EnhancementEngine(provider=ctx.llm)
         better = engine.enhance("a lone knight in a forest")
     """
 
-    def __init__(self, prmultigenaider: Optional["LLMPrmultigenaider"] = None) -> None:
+    def __init__(self, provider: Optional["LLMProvider"] = None) -> None:
         """
         Args:
-            prmultigenaider: Optional LLM backend. If None, rule-based path is used.
+            provider: Optional LLM backend. If None, rule-based path is used.
         """
-        self._prmultigenaider = prmultigenaider
-        if prmultigenaider:
-            LOG.debug(f"EnhancementEngine: LLM prmultigenaider set ({type(prmultigenaider).__name__})")
+        self._provider = provider
+        if provider:
+            LOG.debug(f"EnhancementEngine: LLM provider set ({type(provider).__name__})")
         else:
-            LOG.debug("EnhancementEngine: no prmultigenaider — rule-based mode")
+            LOG.debug("EnhancementEngine: no provider — rule-based mode")
 
     # ------------------------------------------------------------------
     # Public API
@@ -84,7 +84,7 @@ class EnhancementEngine:
 
         Flow:
           1. If already enhanced (idempotence check) → return as-is
-          2. If prmultigenaider set → try LLM rewrite, catch PrmultigenaiderUnavailableError
+          2. If provider set → try LLM rewrite, catch ProviderUnavailableError
           3. Append quality tokens (with final idempotence guard)
 
         Args:
@@ -99,11 +99,11 @@ class EnhancementEngine:
 
         rewritten = prompt
 
-        # --- LLM path (when prmultigenaider is present) ---
-        if self._prmultigenaider is not None:
+        # --- LLM path (when provider is present) ---
+        if self._provider is not None:
             try:
-                from multigenai.core.exceptions import PrmultigenaiderUnavailableError
-                rewritten = self._prmultigenaider.generate(
+                from multigenai.core.exceptions import ProviderUnavailableError
+                rewritten = self._provider.generate(
                     prompt, system_prompt=_ENHANCEMENT_SYSTEM_PROMPT
                 )
                 LOG.debug(

@@ -1,12 +1,27 @@
-import torch 
+"""Upstream-derived Ovi loading helpers.
+
+This module is the reference implementation for Ovi model construction and
+strict checkpoint loading. Engines should delegate here rather than growing a
+second, divergent loader.
+
+Repairs applied:
+  * ``multigenai.modules.*`` imports pointed at a package layout that no longer
+    exists; the modules live under ``multigenai.models.*``.
+  * DiT config paths were CWD-relative (``"multigenai/configs/..."``) and only
+    resolved when the process started from the repo root. They are now loaded
+    package-relatively via :func:`multigenai.ovi.contracts.load_dit_config`.
+"""
+import torch
 import os
 import json
+import pathlib
+
 from safetensors.torch import load_file
 
-from multigenai.modules.fusion import FusionModel
-from multigenai.modules.t5 import T5EncoderModel
-from multigenai.modules.vae2_2 import Wan2_2_VAE
-from multigenai.modules.mmaudio.features_utils import FeaturesUtils
+from multigenai.models.fusion import FusionModel
+from multigenai.models.shared.t5 import T5EncoderModel
+from multigenai.models.wan.vae2_2 import Wan2_2_VAE
+from multigenai.models.mmaudio.mmaudio_core.features_utils import FeaturesUtils
     
 def init_wan_vae_2_2(ckpt_dir, rank=0):
     vae_config = {}
@@ -33,16 +48,11 @@ def init_mmaudio_vae(ckpt_dir, rank=0):
     return vae
 
 def init_fusion_score_model_multigenai(rank: int = 0, meta_init=False):
-    video_config = "multigenai/configs/model/dit/video.json"
-    audio_config = "multigenai/configs/model/dit/audio.json"
-    assert os.path.exists(video_config), f"{video_config} does not exist"
-    assert os.path.exists(audio_config), f"{audio_config} does not exist"
+    # Package-relative config loading (no CWD dependence).
+    from multigenai.ovi.contracts import load_dit_config
 
-    with open(video_config) as f:
-        video_config = json.load(f)
-
-    with open(audio_config) as f:
-        audio_config = json.load(f)
+    video_config = load_dit_config("video")
+    audio_config = load_dit_config("audio")
 
     if meta_init:
         with torch.device("meta"):

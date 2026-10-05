@@ -1,12 +1,12 @@
 """
-LocalLLMPrmultigenaider — Ollama-compatible local LLM backend.
+LocalLLMProvider — Ollama-compatible local LLM backend.
 
 Communicates with Ollama's HTTP API (default: http://localhost:11434).
 Also works with any Ollama-compatible local server (LM Studio, etc.).
 
 Kaggle safety:
   - `requests` imported lazily inside methods — never at module level
-  - Falls back to PrmultigenaiderUnavailableError on any failure — never crashes caller
+  - Falls back to ProviderUnavailableError on any failure — never crashes caller
 
 Retry policy:
   - max_retries: 2 attempts on transient network errors
@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Optional
 
 from multigenai.core.logging.logger import get_logger
-from multigenai.llm.prmultigenaiders.base import LLMPrmultigenaider
+from multigenai.llm.providers.base import LLMProvider
 
 LOG = get_logger(__name__)
 
@@ -28,20 +28,20 @@ _DEFAULT_TIMEOUT = 30.0
 _MAX_NETWORK_RETRIES = 2
 
 
-class LocalLLMPrmultigenaider(LLMPrmultigenaider):
+class LocalLLMProvider(LLMProvider):
     """
-    LLM prmultigenaider that calls a locally-running Ollama-compatible server.
+    LLM provider that calls a locally-running Ollama-compatible server.
 
     Usage (via config):
         llm:
-          prmultigenaider: local
+          provider: local
           model: mistral
           endpoint: http://localhost:11434/api/generate
           timeout_seconds: 30
 
     Usage (direct):
-        prmultigenaider = LocalLLMPrmultigenaider(model="mistral")
-        text = prmultigenaider.generate("Enhance this prompt: a stormy sea")
+        provider = LocalLLMProvider(model="mistral")
+        text = provider.generate("Enhance this prompt: a stormy sea")
     """
 
     def __init__(
@@ -53,10 +53,10 @@ class LocalLLMPrmultigenaider(LLMPrmultigenaider):
         self._model = model
         self._endpoint = endpoint
         self._timeout = timeout_seconds
-        LOG.debug(f"LocalLLMPrmultigenaider configured: model={model} endpoint={endpoint}")
+        LOG.debug(f"LocalLLMProvider configured: model={model} endpoint={endpoint}")
 
     # ------------------------------------------------------------------
-    # LLMPrmultigenaider interface
+    # LLMProvider interface
     # ------------------------------------------------------------------
 
     def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
@@ -71,23 +71,23 @@ class LocalLLMPrmultigenaider(LLMPrmultigenaider):
             Generated text string.
 
         Raises:
-            PrmultigenaiderTimeoutError:    on timeout.
-            PrmultigenaiderResponseError:   on HTTP 4xx/5xx (non-auth).
-            PrmultigenaiderUnavailableError: on connection error.
+            ProviderTimeoutError:    on timeout.
+            ProviderResponseError:   on HTTP 4xx/5xx (non-auth).
+            ProviderUnavailableError: on connection error.
         """
         try:
             import requests
         except ImportError:
-            from multigenai.core.exceptions import PrmultigenaiderUnavailableError
-            raise PrmultigenaiderUnavailableError(
+            from multigenai.core.exceptions import ProviderUnavailableError
+            raise ProviderUnavailableError(
                 "The 'requests' library is not installed. "
                 "Run: pip install requests"
             )
 
         from multigenai.core.exceptions import (
-            PrmultigenaiderResponseError,
-            PrmultigenaiderTimeoutError,
-            PrmultigenaiderUnavailableError,
+            ProviderResponseError,
+            ProviderTimeoutError,
+            ProviderUnavailableError,
         )
 
         payload: dict = {
@@ -103,7 +103,7 @@ class LocalLLMPrmultigenaider(LLMPrmultigenaider):
         for attempt in range(1, _MAX_NETWORK_RETRIES + 1):
             try:
                 LOG.debug(
-                    f"LocalLLMPrmultigenaider attempt {attempt}/{_MAX_NETWORK_RETRIES} "
+                    f"LocalLLMProvider attempt {attempt}/{_MAX_NETWORK_RETRIES} "
                     f"model={self._model}"
                 )
                 resp = requests.post(
@@ -114,41 +114,41 @@ class LocalLLMPrmultigenaider(LLMPrmultigenaider):
 
                 if resp.status_code in (401, 403):
                     # Ollama doesn't normally auth, but guard anyway
-                    from multigenai.core.exceptions import PrmultigenaiderAuthError
-                    raise PrmultigenaiderAuthError(self._endpoint)
+                    from multigenai.core.exceptions import ProviderAuthError
+                    raise ProviderAuthError(self._endpoint)
 
                 if not resp.ok:
-                    raise PrmultigenaiderResponseError(
+                    raise ProviderResponseError(
                         self._endpoint, resp.status_code, resp.text
                     )
 
                 data = resp.json()
                 # Ollama format: {"response": "...", "done": true}
                 if "response" not in data:
-                    from multigenai.core.exceptions import PrmultigenaiderResponseFormatError
-                    raise PrmultigenaiderResponseFormatError(
+                    from multigenai.core.exceptions import ProviderResponseFormatError
+                    raise ProviderResponseFormatError(
                         "Ollama response missing 'response' key",
                         details={"keys": list(data.keys())},
                     )
 
                 text = data["response"].strip()
-                LOG.debug(f"LocalLLMPrmultigenaider got {len(text)} chars")
+                LOG.debug(f"LocalLLMProvider got {len(text)} chars")
                 return text
 
             except requests.Timeout:
-                last_error = PrmultigenaiderTimeoutError(self._endpoint, self._timeout)
-                LOG.warning(f"LocalLLMPrmultigenaider timeout attempt {attempt}")
+                last_error = ProviderTimeoutError(self._endpoint, self._timeout)
+                LOG.warning(f"LocalLLMProvider timeout attempt {attempt}")
                 continue
 
             except requests.ConnectionError as exc:
-                last_error = PrmultigenaiderUnavailableError(
+                last_error = ProviderUnavailableError(
                     f"Cannot connect to Ollama at {self._endpoint}: {exc}",
                     details={"endpoint": self._endpoint},
                 )
-                LOG.warning(f"LocalLLMPrmultigenaider connection error attempt {attempt}: {exc}")
+                LOG.warning(f"LocalLLMProvider connection error attempt {attempt}: {exc}")
                 continue
 
-            except (PrmultigenaiderResponseError, PrmultigenaiderUnavailableError):
+            except (ProviderResponseError, ProviderUnavailableError):
                 raise  # re-raise typed errors immediately (no retry benefit)
 
         # All retries exhausted

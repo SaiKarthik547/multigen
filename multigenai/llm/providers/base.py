@@ -1,19 +1,19 @@
 """
-LLMPrmultigenaider — Abstract base class for all LLM backends.
+LLMProvider — Abstract base class for all LLM backends.
 
 Design rules:
   - No SDK imports here (no openai, no google.generativeai)
   - No network calls here
-  - All prmultigenaiders receive their config via constructor
+  - All providers receive their config via constructor
   - structured_generate() applies retry + JSON extraction + schema validation
   - All failures surface as typed exceptions (never raw Exception)
 
 Exception hierarchy (defined in core.exceptions):
-  PrmultigenaiderUnavailableError   — backend unreachable (general)
-    PrmultigenaiderTimeoutError     — connect/read timeout
-    PrmultigenaiderAuthError        — 401/403 or missing credentials
-    PrmultigenaiderResponseError    — HTTP 4xx/5xx other than auth
-    PrmultigenaiderResponseFormatError — malformed JSON from model
+  ProviderUnavailableError   — backend unreachable (general)
+    ProviderTimeoutError     — connect/read timeout
+    ProviderAuthError        — 401/403 or missing credentials
+    ProviderResponseError    — HTTP 4xx/5xx other than auth
+    ProviderResponseFormatError — malformed JSON from model
 """
 
 from __future__ import annotations
@@ -105,9 +105,9 @@ def extract_json(text: str) -> str:
 
 
 
-class LLMPrmultigenaider(ABC):
+class LLMProvider(ABC):
     """
-    Abstract base for all LLM prmultigenaider backends.
+    Abstract base for all LLM provider backends.
 
     Subclasses implement:
       generate()            — raw text generation
@@ -133,10 +133,10 @@ class LLMPrmultigenaider(ABC):
             Model response as a plain string.
 
         Raises:
-            PrmultigenaiderTimeoutError: on connect/read timeout.
-            PrmultigenaiderAuthError:    on authentication failure.
-            PrmultigenaiderResponseError: on other HTTP errors.
-            PrmultigenaiderUnavailableError: on network-level failure.
+            ProviderTimeoutError: on connect/read timeout.
+            ProviderAuthError:    on authentication failure.
+            ProviderResponseError: on other HTTP errors.
+            ProviderUnavailableError: on network-level failure.
         """
 
     def structured_generate(self, prompt: str, schema: "Type[BaseModel]") -> "BaseModel":
@@ -149,7 +149,7 @@ class LLMPrmultigenaider(ABC):
           3. Extract ALL JSON candidates from response
           4. Try each candidate against schema until one validates
           5. If none validate, retry with fix prompt (max MAX_RETRIES times)
-          6. Wrap all failures as PrmultigenaiderResponseFormatError
+          6. Wrap all failures as ProviderResponseFormatError
 
         Args:
             prompt: Instruction describing what to generate.
@@ -159,11 +159,11 @@ class LLMPrmultigenaider(ABC):
             Validated Pydantic model instance.
 
         Raises:
-            PrmultigenaiderResponseFormatError: if no candidate validates
+            ProviderResponseFormatError: if no candidate validates
                                         after all retries.
-            Any PrmultigenaiderUnavailableError subclass: from generate() itself.
+            Any ProviderUnavailableError subclass: from generate() itself.
         """
-        from multigenai.core.exceptions import PrmultigenaiderResponseFormatError
+        from multigenai.core.exceptions import ProviderResponseFormatError
 
         last_error: Exception = Exception("Unknown error")
         current_prompt = prompt
@@ -189,7 +189,7 @@ class LLMPrmultigenaider(ABC):
                 )
                 current_prompt = f"{prompt}\n\n{_JSON_FIX_PROMPT}"
 
-        raise PrmultigenaiderResponseFormatError(
+        raise ProviderResponseFormatError(
             f"Structured generation failed after {self.MAX_RETRIES} attempts",
             details={"schema": schema.__name__, "cause": str(last_error)},
         ) from last_error

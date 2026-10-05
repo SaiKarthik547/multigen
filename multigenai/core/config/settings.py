@@ -83,15 +83,15 @@ class LLMSettings:
 
     Attributes:
         enabled:       Master switch — if False, rule-based fallback is used.
-        prmultigenaider:      "local" (Ollama) | "api" (Gemini/OpenAI)
-        api_mode:      "gemini" | "openai" — only relevant when prmultigenaider="api"
+        provider:      "local" (Ollama) | "api" (Gemini/OpenAI)
+        api_mode:      "gemini" | "openai" — only relevant when provider="api"
         model:         Ollama model name or API model ID
-        endpoint:      Full URL for the prmultigenaider's generate endpoint
+        endpoint:      Full URL for the provider's generate endpoint
         api_key_env:   Name of the env var that holds the actual API key
         timeout_seconds: Per-request timeout
     """
     enabled: bool = False
-    prmultigenaider: str = "local"
+    provider: str = "local"
     api_mode: str = "gemini"
     model: str = "mistral"
     endpoint: str = "http://localhost:11434/api/generate"
@@ -246,8 +246,8 @@ def get_settings(config_path: Optional[pathlib.Path] = None) -> Settings:
             enabled=_env_bool(
                 "llm_enabled", bool(llm_raw.get("enabled", False))
             ),
-            prmultigenaider=_env(
-                "llm_prmultigenaider", llm_raw.get("prmultigenaider", "local")
+            provider=_env(
+                "llm_provider", llm_raw.get("provider", "local")
             ),
             api_mode=_env(
                 "llm_api_mode", llm_raw.get("api_mode", "gemini")

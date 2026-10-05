@@ -199,6 +199,20 @@ class ModelRegistry:
         """
         Unload a model and free its memory.
 
+        P0-C: this previously only dropped the registry's reference and logged.
+        The actual teardown contract (`del` -> `gc` -> `empty_cache` ->
+        `ipc_collect`) lived in ModelLifecycle and was never invoked from this
+        path, so VRAM was not returned to the allocator.
+
+        It now:
+          1. drops the registry reference,
+          2. runs ModelLifecycle.enforce_cleanup() to sweep the object graph
+             and return freed blocks,
+          3. records the post-unload reserved-VRAM level for leak detection.
+
+        Callers that hold their own reference (e.g. an engine's `self.bundle`)
+        MUST null it as well; see ModelLifecycle.safe_unload().
+
         Args:
             model_id: Registered model identifier.
         """
@@ -210,7 +224,12 @@ class ModelRegistry:
                 return
             entry.instance = None
             entry.loaded = False
-            LOG.info(f"Model '{model_id}' unloaded.")
+
+        # Teardown outside the registry lock: gc + CUDA flush can be slow and
+        # must not block concurrent registry lookups.
+        from multigenai.core.model_lifecycle import ModelLifecycle
+        ModelLifecycle.enforce_cleanup(f"registry.unload:{model_id}")
+        LOG.info(f"Model '{model_id}' unloaded and VRAM reclaimed.")
 
     def is_loaded(self, model_id: str) -> bool:
         """Return True if the model is currently loaded."""
@@ -222,20 +241,22 @@ class ModelRegistry:
             return {mid: e.loaded for mid, e in self._models.items()}
 
     def unload_all(self) -> None:
-        """Unload every loaded model (called on shutdown or Kaggle post-generation)."""
+        """Unload every loaded model (called on shutdown or post-generation)."""
+        unloaded: list[str] = []
         with self._model_lock:
             for mid, entry in self._models.items():
                 if entry.loaded:
                     entry.instance = None
                     entry.loaded = False
-                    try:
-                        import logging as _lg
-                        _prev = _lg.raiseExceptions
-                        _lg.raiseExceptions = False
-                        LOG.info(f"Model '{mid}' unloaded during shutdown.")
-                        _lg.raiseExceptions = _prev
-                    except Exception:
-                        pass
+                    unloaded.append(mid)
+
+        if not unloaded:
+            return
+
+        # P0-C: same teardown contract as unload() — one sweep for the whole set.
+        from multigenai.core.model_lifecycle import ModelLifecycle
+        ModelLifecycle.enforce_cleanup("registry.unload_all")
+        LOG.info(f"Models unloaded during shutdown: {unloaded}")
 
     def update_runtime(self, model_id: str, duration_seconds: float, peak_vram_mb: int = 0) -> None:
         """

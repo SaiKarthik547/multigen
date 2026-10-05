@@ -30,6 +30,11 @@ if TYPE_CHECKING:
 
 LOG = get_logger(__name__)
 
+# P0-N: package-relative DiT config directory. Replaces the previous
+# CWD-relative `pathlib.Path("multigenai/configs/model/dit")`, which only
+# resolved when the process happened to start from the repo root.
+_DIT_CONFIG_DIR = pathlib.Path(__file__).resolve().parents[2] / "configs" / "model" / "dit"
+
 
 @dataclass
 class FusionResult:
@@ -76,25 +81,37 @@ class FusionEngine:
             from safetensors.torch import load_file
 
             # 1. Joint Transformer Backbone (Wan 2.2)
-            cfg_path = pathlib.Path("multigenai/configs/model/dit") / "video.json"
+            # P0-N: package-relative config paths — never CWD-relative.
+            cfg_path = _DIT_CONFIG_DIR / "video.json"
             with open(cfg_path) as f:
                 config = json.load(f)
-            
+
             # audio backbone
-            a_cfg_path = pathlib.Path("multigenai/configs/model/dit") / "audio.json"
+            a_cfg_path = _DIT_CONFIG_DIR / "audio.json"
             with open(a_cfg_path) as f:
                 a_config = json.load(f)
-            
-            # Hook Identity Mapping if I2V
-            if is_i2v:
-                config['additional_emb_dim'] = 512
-                config['additional_emb_length'] = 257
-                
+
+            # P0-B: identity is NOT injected via additional_emb_*.
+            #
+            # wan/model.py maps model_type 'ti2v' -> 't2v_cross_attn', which asserts
+            #     additional_emb_dim is None and additional_emb_length is None
+            # (see wan/model.py cross_attn_type resolution + assert).
+            # Injecting 512/257 therefore made construction of every I2V bundle fail
+            # with:
+            #     AssertionError: additional_emb_length should be None for t2v and t2a model
+            #
+            # I2V conditioning is delivered as an image latent occupying the first
+            # temporal slot (first_frame_is_clean=True) instead. ArcFace embeddings
+            # are used for candidate selection / quality control, never as a
+            # transformer cross-attention embedding.
+            for key in ("additional_emb_dim", "additional_emb_length"):
+                config.pop(key, None)
+
             from multigenai.models.fusion.fusion import FusionModel
             model = FusionModel(video_config=config, audio_config=a_config).to(self.device).to(torch.bfloat16).eval()
             
             # Load weights for both (they might be in separate safetensors or shared)
-            # Based on ovi_fusion_engine.py, it loads into self.video_model and self.audio_model
+            # Derived from the upstream reference loader: weights load into the video and audio sub-models.
             model.video_model.load_state_dict(load_file(pathlib.Path(self.wan_path) / "model.safetensors", device="cpu"), strict=False)
             model.audio_model.load_state_dict(load_file(pathlib.Path(self.mmaudio_path) / "model.safetensors", device="cpu"), strict=False)
             
@@ -127,11 +144,93 @@ class FusionEngine:
         
         self.bundle = self.registry.get(model_id, environment=self._ctx.environment)
 
+    def _resolve_latent_dims(self, video_cfg, audio_cfg, vl_h, vl_w, latents_images, request) -> None:
+        """Resolve the latent temporal length and transformer sequence lengths.
+
+        Contract (Gate M2/M3 — see docs/ROADMAP_REVIEW.md):
+        the latent temporal length is NOT the frame count. The Wan VAE applies
+        ``temperal_downsample=[False, True, True]`` (4x temporal compression),
+        so it has not been measured on real weights yet.
+
+        Therefore, in priority order:
+          1. If an I2V image latent was produced, its temporal length is
+             authoritative — it came out of the real VAE.
+          2. Otherwise the resolved OviModelSpec's measured shape is used.
+          3. Otherwise we fall back to the frame count *and log a loud warning*,
+             because that fallback is the exact assumption that caused the
+             original bug. It is not silently trusted downstream.
+
+        Sets ``self._v_latent_f``, ``self._a_latent_len``,
+        ``self._v_seq_len`` and ``self._a_seq_len``.
+        """
+        from multigenai.ovi.contracts import (
+            OviModelSpec,
+            UnobservedContractError,
+            derive_seq_len,
+        )
+
+        video_patch = tuple(video_cfg["patch_size"])
+        audio_patch = tuple(audio_cfg["patch_size"])
+
+        # --- 1. Measured-from-VAE I2V latent ---
+        if latents_images is not None:
+            latent_f = int(latents_images.shape[1])
+            source = "i2v image latent (measured via Wan2_2_VAE.wrapped_encode)"
+        else:
+            # --- 2. Spec-observed, else 3. flagged fallback ---
+            spec = getattr(self, "_ovi_spec", None)
+            observed = getattr(spec, "observed_video", None) if spec else None
+            if observed is not None and observed.is_provenance_backed:
+                latent_f = int(observed.latent_shape[0])
+                source = f"spec '{spec.name}' observed video latent"
+            else:
+                latent_f = int(getattr(request, "num_frames", 81) or 81)
+                source = None
+                LOG.warning(
+                    "FusionEngine: NO MEASURED video latent length available. "
+                    f"Falling back to num_frames={latent_f}. The Wan VAE applies "
+                    "4x temporal compression, so this is very likely WRONG. "
+                    "Run Gate M2 (encode a real clip through Wan2_2_VAE and record "
+                    "configs/observed/<variant>.observed.json) before trusting output."
+                )
+
+        self._v_latent_f = latent_f
+        self._v_seq_len = derive_seq_len((latent_f, vl_h, vl_w), video_patch)
+
+        # Audio latent length has no I2V analogue; it must come from the spec.
+        spec = getattr(self, "_ovi_spec", None)
+        a_observed = getattr(spec, "observed_audio", None) if spec else None
+        if a_observed is not None and a_observed.is_provenance_backed:
+            self._a_latent_len = int(a_observed.latent_shape[0])
+        else:
+            self._a_latent_len = int(getattr(spec, "audio_latent_length", None) or 157)
+            LOG.warning(
+                "FusionEngine: NO MEASURED audio latent length available; using "
+                f"{self._a_latent_len}. Run Gate M3 to record the real value."
+            )
+        self._a_seq_len = derive_seq_len(
+            (self._a_latent_len, 1, 1), audio_patch
+        )
+
+        LOG.info(
+            f"FusionEngine latent dims: video=({latent_f}, {vl_h}, {vl_w}) "
+            f"-> vid_seq_len={self._v_seq_len} [{source}]; "
+            f"audio_len={self._a_latent_len} -> audio_seq_len={self._a_seq_len}"
+        )
+
     def _unload(self) -> None:
+        """Release the Ovi bundle and return VRAM to the allocator.
+
+        P0-C ownership contract: nulling the registry reference is not enough.
+        The engine also holds the bundle in `self.bundle`, so that reference is
+        dropped explicitly BEFORE the registry teardown runs the gc/CUDA sweep —
+        otherwise the models stay reachable and VRAM is never freed.
+        """
+        from multigenai.core.model_lifecycle import ModelLifecycle
+
+        self.bundle = None
         self.registry.unload("mgos_fusion_bundle")
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        ModelLifecycle.enforce_cleanup("FusionEngine._unload")
 
     def run(self, request: "VideoGenerationRequest", image_path: Optional[str] = None, 
             temporal_state: Optional["TemporalState"] = None, 
@@ -179,8 +278,34 @@ class FusionEngine:
                 vl_h, vl_w = latents_images.shape[2], latents_images.shape[3]
 
             # 3. Joint Noise Distribution
-            v_noise = torch.randn((16, 81, vl_h, vl_w), device=self.device, dtype=torch.bfloat16)
-            a_noise = torch.randn((157, 12), device=self.device, dtype=torch.bfloat16)
+            #
+            # Channel counts come from the DiT configs — they were previously
+            # hardcoded as 16 (video) and 12 (audio), which contradicted
+            # in_dim=48 / in_dim=20 and would have failed the Conv3d patch
+            # embedding on channel count alone.
+            from multigenai.ovi.contracts import load_dit_config
+
+            video_cfg = load_dit_config("video")
+            audio_cfg = load_dit_config("audio")
+            video_in_dim = int(video_cfg["in_dim"])
+            audio_in_dim = int(audio_cfg["in_dim"])
+
+            # Temporal/ssequence lengths must come from the resolved model spec,
+            # which holds shapes *measured* through the VAE. Until Gate M2/M3
+            # have run on real weights there is no measured shape, so we refuse
+            # to guess and derive from the I2V latent when one is available.
+            self._resolve_latent_dims(
+                video_cfg, audio_cfg, vl_h, vl_w, latents_images, request
+            )
+
+            v_noise = torch.randn(
+                (video_in_dim, self._v_latent_f, vl_h, vl_w),
+                device=self.device, dtype=torch.bfloat16,
+            )
+            a_noise = torch.randn(
+                (self._a_latent_len, audio_in_dim),
+                device=self.device, dtype=torch.bfloat16,
+            )
             
             if temporal_state and temporal_state.global_latent is not None:
                 v_noise[:, :1] = temporal_state.global_latent.to(self.device).to(torch.bfloat16)
@@ -208,12 +333,12 @@ class FusionEngine:
                     # A. Classifier-Free Guidance forward passes
                     p_v, p_a = model(vid=[current_v], audio=[current_a], t=t_input, 
                                      vid_context=[v_pos_emb], audio_context=[a_pos_emb],
-                                     vid_seq_len=81, audio_seq_len=157,
+                                     vid_seq_len=self._v_seq_len, audio_seq_len=self._a_seq_len,
                                      clip_fea=id_emb if is_i2v else None)
                     # Neg
                     n_v, n_a = model(vid=[current_v], audio=[current_a], t=t_input,
                                      vid_context=[v_neg_emb], audio_context=[a_neg_emb],
-                                     vid_seq_len=81, audio_seq_len=157,
+                                     vid_seq_len=self._v_seq_len, audio_seq_len=self._a_seq_len,
                                      slg_layer=9)
                     
                     # B. Guidance Merging (MGOS Standard Scales)
@@ -255,7 +380,7 @@ class FusionEngine:
             LOG.error(f"FusionEngine Error: {e}\n{traceback.format_exc()}")
             return FusionResult("", "", torch.zeros(1), 0, 0, 0, False, str(e))
         finally:
-            if self._ctx.settings.auto_unload:
+            if self._ctx.behaviour.auto_unload_after_gen:
                 self._unload()
 
     def get_scheduler_time_steps(self, sampling_steps, solver_name='unipc', device=0, shift=5.0):

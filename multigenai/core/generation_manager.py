@@ -216,9 +216,36 @@ class GenerationManager:
                 
                 # A. Deep Synchronization (Wan 2.2 + MMAudio)
                 # This performs a unified score prediction for visuals and sound
+                #
+                # Reference-image resolution (engine-agnostic).
+                #
+                # Priority:
+                #   1. scene.keyframe_path   - a per-scene keyframe, if the planner set one
+                #   2. scene_state.reference_frame_path - the keyframe produced by the
+                #      IMAGE stage, which generate_image() records at
+                #      scene_memory.update(reference_frame_path=result.path).
+                #      This fallback was dropped during the Ovi merge, which left the
+                #      image -> video handoff dead and forced I2V off permanently.
+                #   3. conditioning_image_path - caller-supplied reference
+                #
+                # Only the *path* is decided here. Conversion to an Ovi/Wan first-frame
+                # latent is the backend's job (Wan VAE + first_frame_is_clean), so no
+                # diffusers/SD latent logic leaks into this layer.
+                scene_state = self._ctx.scene_memory.get()
+                reference_image = (
+                    scene.keyframe_path
+                    or scene_state.reference_frame_path
+                    or conditioning_image_path
+                )
+                if reference_image:
+                    LOG.info(
+                        f"GenerationManager: Scene {scene.scene_id} I2V reference "
+                        f"resolved -> {reference_image}"
+                    )
+
                 fusion_res = fusion_engine.run(
                     request=seg_request,
-                    image_path=scene.keyframe_path or conditioning_image_path,
+                    image_path=reference_image,
                     temporal_state=temporal_state,
                     dialogue=scene.dialogue
                 )
@@ -237,7 +264,10 @@ class GenerationManager:
                 
             # D. Final Cinematic Movie Stitching
             from multigenai.utils.movie_utils import stitch_cinematic_movie
-            final_movie_path = self._ctx.settings.output_dir / f"mgos_movie_{int(torch.randint(0, 1000, (1,)).item())}.mp4"
+            # P0-A: settings.output_dir is a str, not a Path. Coerce before using `/`.
+            output_dir = pathlib.Path(self._ctx.settings.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            final_movie_path = output_dir / f"mgos_movie_{int(torch.randint(0, 1000, (1,)).item())}.mp4"
             stitch_cinematic_movie(video_segments, audio_segments, str(final_movie_path))
             
             from multigenai.engines.video_engine.engine import VideoResult

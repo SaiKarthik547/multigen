@@ -115,12 +115,18 @@ class VideoEngine:
         self.bundle = self.registry.get(model_id, environment=self._ctx.environment)
 
     def _unload_model(self) -> None:
-        """Flushes VRAM via MGOS Registry."""
+        """Release the Wan bundle and return VRAM to the allocator.
+
+        P0-C ownership contract: `self.bundle` is nulled before the registry
+        teardown runs its gc/CUDA sweep, otherwise the engine keeps the models
+        reachable and VRAM is never returned to the allocator.
+        """
+        from multigenai.core.model_lifecycle import ModelLifecycle
+
+        self.bundle = None
         self.registry.unload("wan2_2_i2v")
         self.registry.unload("wan2_2_t2v")
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        ModelLifecycle.enforce_cleanup("VideoEngine._unload_model")
 
     def _map_identity_to_wan(self, character_id: str) -> Optional[torch.Tensor]:
         """
@@ -247,7 +253,7 @@ class VideoEngine:
             from multigenai.engines.video_engine.ffmpeg_utils import encode_video
             result = encode_video(frames, out_path, request.fps, seed)
             
-            if self._ctx.settings.video.auto_unload:
+            if self._ctx.behaviour.auto_unload_after_gen:
                 self._unload_model()
                 
             return result

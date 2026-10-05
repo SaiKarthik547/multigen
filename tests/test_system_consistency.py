@@ -12,28 +12,58 @@ def get_project_files():
     return list(root.rglob("*.py"))
 
 def test_static_rebranding_audit():
-    """Ensure no legacy 'ovi' references exist in the core codebase."""
+    """Ensure no references to *removed* upstream module paths survive.
+
+    HISTORY
+    -------
+    This test used to forbid the bare word ``ovi``. That was correct while the
+    vendored upstream Ovi code was considered legacy scaffolding to be
+    rebranded away. It is now inverted: Ovi is the intended cinematic backend,
+    so the literal word is legitimate.
+
+    What is still genuinely stale -- and what this test now guards -- are
+    references to module paths that **no longer exist**:
+
+      * ``multigenai.modules.*``  (pre-merge package layout, renamed to
+        ``multigenai.models.*``)
+      * ``multigenai.llm.providers`` under its corrupted spelling
+      * ``ovi_fusion_engine`` / other one-off script names
+
+    A stale import is a hard crash at module import time, which is exactly the
+    class of defect this audit exists to catch.
+    """
     files = get_project_files()
-    legacy_pattern = re.compile(r'\bovi\b', re.IGNORECASE)
-    
+
+    stale_patterns = [
+        (re.compile(r"multigenai\.modules\."), "removed package 'multigenai.modules'"),
+        (re.compile(r"\bprmultigenaider", re.IGNORECASE), "corrupted 'provider' rename"),
+        (re.compile(r"\bovi_fusion_engine\b"), "removed script 'ovi_fusion_engine'"),
+    ]
+
     failures = []
     for f in files:
-        # Skip this check for the audit tools themselves and 3rd party ext
-        if "tests" in str(f) or "system_check" in str(f) or "mmaudio_core\\ext" in str(f):
+        # Skip the audit tools themselves and vendored third-party extensions.
+        if "tests" in str(f) or "system_check" in str(f) or "mmaudio_core" in str(f):
             continue
-            
+
         try:
             with open(f, "r", encoding="utf-8", errors="ignore") as fh:
                 for i, line in enumerate(fh):
-                    if legacy_pattern.search(line):
-                        # Filter out known false positives (system-level strings)
-                        if "multigenai" in line.lower():
-                            continue
-                        failures.append(f"{f.relative_to(f.parent.parent.parent)}:L{i+1} -> {line.strip()}")
+                    # Only executable import statements count. Docstrings and
+                    # comments may legitimately *mention* the removed paths to
+                    # explain why they were replaced.
+                    stripped = line.strip()
+                    if not (stripped.startswith(("import ", "from "))):
+                        continue
+                    for pattern, reason in stale_patterns:
+                        if pattern.search(stripped):
+                            rel = f.relative_to(f.parent.parent.parent)
+                            failures.append(f"{rel}:L{i+1} -> {reason}: {stripped}")
+                            break
         except Exception:
             continue
-    
-    assert not failures, f"Found legacy Ovi references:\n" + "\n".join(failures)
+
+    assert not failures, "Found stale upstream references:\n" + "\n".join(failures)
 
 def test_registry_key_consistency():
     """Verify Engines use the correct MGOS/Kaggle registry keys."""

@@ -138,7 +138,7 @@ class FaceEncoder:
         try:
             app = FaceAnalysis(
                 name=_INSIGHTFACE_MODEL_NAME,
-                prmultigenaiders=["CPUExecutionPrmultigenaider"],
+                providers=["CPUExecutionProvider"],
             )
             # det_size=(640, 640) → standard detection resolution for buffalo_l
             app.prepare(ctx_id=_INSIGHTFACE_CTX_ID, det_size=(640, 640))
