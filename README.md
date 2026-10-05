@@ -1,22 +1,117 @@
 # 🎬 MultiGenAI OS (MGOS)
 
-> **A modular, multi-modal AI content generation operating system** — generate photorealistic images, videos, audio, documents, code, and presentations from a single natural language prompt. Built on SDXL, SVD-XT, and a pluggable creative intelligence layer.
+> **A modular, multi-modal AI content generation operating system** — generate photorealistic images, videos, audio, documents, code, and presentations from a single natural language prompt. Built on SDXL, a pluggable video-backend layer (AnimateDiff primary, Ovi for high-VRAM hosts), and a pluggable creative intelligence layer.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://python.org)
 [![Diffusers](https://img.shields.io/badge/Diffusers-0.24%2B-orange)](https://github.com/huggingface/diffusers)
-[![Tests](https://img.shields.io/badge/Tests-323%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/Tests-424%20passing%20(6%20pre-existing%20failures)-yellowgreen)](#running-tests)
 [![License](https://img.shields.io/badge/License-MIT-green)](#license)
 
 ---
 
 ## ⚠️ Architecture status — read this first
 
-**The video backend is now [Ovi](https://github.com/character-ai/Ovi)** (joint
-audio-video generation). Everything below the banner describing the video
-pipeline as **SVD-XT / AnimateDiff + RIFE** is **historical** and describes
-retired code paths. It is kept for context, not as current behaviour.
+**Video generation is becoming a pluggable backend layer.** Two backends are
+planned; one is being built now, the other is frozen pending suitable hardware.
 
-### The pipeline that actually runs today
+| Backend | Role | Model stack | Status |
+|---|---|---|---|
+| **AnimateDiff** | **PRIMARY / local** | SD1.5 + MotionAdapter | 🚧 **In build** — migration phases 1-4 |
+| **Ovi** | FUTURE / high-VRAM | joint audio-video fusion (Wan + MMAudio) | ✅ structurally complete · ❄️ **frozen** — needs high-end GPU |
+
+> **Why:** Ovi's integration is structurally complete but cannot be exercised on
+> consumer hardware (see *VRAM reality check* below). AnimateDiff becomes the
+> primary backend so development is executable locally, while Ovi is preserved
+> behind the same interface as a high-end backend — **not discarded**.
+
+Everything further down this README describing the video pipeline as
+**SVD-XT / AnimateDiff v2 + RIFE** (the historical Phase 6-12 engine) is
+**historical** and describes retired code paths. It is kept for context, not as
+current behaviour.
+
+### Target architecture
+
+```
+                        GenerationManager
+                               │
+                     (story / planning / assembly)
+                               │
+                               ▼
+                     ┌──────────────────┐
+                     │  VideoBackend    │  generate() / release() / capabilities()
+                     │     interface    │
+                     └────────┬─────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+      AnimateDiffBackend               OviBackend
+      SD1.5 + MotionAdapter             Ovi FusionModel
+              │                               │
+              └───────────────┬───────────────┘
+                              ▼
+                         VideoResult
+              (video_path, last_frame_path, tail_frame_paths,
+               duration_seconds, fps, frame_count,
+               width, height, backend, seed)
+                              │
+             ┌────────────────┼────────────────┐
+             ▼                ▼                ▼
+        continuity      scene memory      movie assembly
+```
+
+**The hard rule:** `GenerationManager → VideoBackend → {AnimateDiff, Ovi} → VideoResult`.
+No downstream component may reach into backend internals. Backend-specific
+parameters (`slg_layer`, `audio_guidance_scale`, `motion_module`, …) live in
+typed backend settings — **never** in the shared request.
+
+### Locked decisions (video backend migration)
+
+1. **Conditioning (scene 1)** — image-conditioned AnimateDiff. ⚠️ See the
+   dependency finding below: the exact pipeline is still an open choice.
+2. **Continuation (scenes 2+)** — `AnimateDiffVideoToVideoPipeline` seeded from
+   the previous scene's **tail frames** (stronger continuity than
+   image-embedding conditioning).
+3. **Identity stays outside the video model** — ArcFace is used for
+   post-generation verification/ranking, never injected as a latent.
+4. **Temporal state stays MultiGen-owned** and is interpreted per backend.
+5. **Phase 0 freeze** (git tag + `feature/animatediff-primary-backend`) is
+   maintained manually by the project owner; the Ovi implementation is not
+   rewritten during the migration.
+
+### ⚠️ Dependency finding — diffusers 0.40.0
+
+Verified against the installed version rather than assumed:
+
+| Capability | Status in diffusers 0.40.0 |
+|---|---|
+| `AnimateDiffPipeline` (text-to-video) | ✅ available |
+| `AnimateDiffPipeline(image=…)` | ❌ **no `image` parameter** — the old img2vid path moved |
+| `AnimateDiffImg2VidPipeline` | ❌ **missing** |
+| `AnimateDiffControlVideoToVideoPipeline` | ❌ missing |
+| `AnimateDiffVideoToVideoPipeline` (`video=`) | ✅ available — backs decision #2 |
+| `AnimateDiffSparseControlNetPipeline` (`conditioning_frames`) | ✅ available |
+| `MotionAdapter.from_pretrained` | ✅ available |
+
+**Open decision:** for scene-1 image conditioning, either
+**SparseCtrl** (`conditioning_frames`, principled RGB conditioning, heavier) or
+**IP-Adapter** (`ip_adapter_image`, lighter but re-enables a subsystem this repo
+retired in Phase 15 — scoped to AnimateDiff only). Pinning an older diffusers to
+recover `image=` is **not** recommended: it conflicts with the frozen Ovi stack's
+dependency pins.
+
+### Shared infrastructure already implemented (backend-neutral)
+
+- **No VRAM overlap between image and video phases** — `ImageEngine.release()`
+  tears the pipeline down before any video backend is constructed.
+- **Last-frame / tail-frame handoff** — `FusionResult.last_frame_path` (and the
+  planned `tail_frame_paths`) carry continuation references across scenes via
+  the image channel, not latent poking.
+- **Movie assembly with transitions** — ffmpeg `xfade` / `acrossfade` with
+  concat fallback and post-assembly duration validation.
+- **Sequential orchestration** — keyframe → release → video → continuation →
+  assembly, covered by tests without any model weights.
+
+### Ovi backend (frozen — structurally complete, awaiting suitable hardware)
 
 ```
 prompt ──► ScenePlanner ──► SDXL keyframe ──► image engine FULLY released
@@ -32,7 +127,7 @@ prompt ──► ScenePlanner ──► SDXL keyframe ──► image engine FUL
           ffmpeg xfade/acrossfade ──► final movie
 ```
 
-Key properties (all enforced in code and covered by tests):
+Key properties (enforced in code and covered by tests):
 
 - **Images and video never share VRAM.** The image engine is torn down via
   `ImageEngine.release()` *before* the Ovi bundle is constructed.
@@ -48,7 +143,7 @@ Key properties (all enforced in code and covered by tests):
 - **Continuation is an image handoff** (previous segment's last decoded frame),
   not latent poking.
 
-### Configuration
+#### Ovi configuration
 
 `multigenai/core/config/model_config.yaml`:
 
@@ -59,7 +154,7 @@ ovi_cpu_offload: null                           # null = auto (true on Kaggle)
 ovi_fp8: null                                   # null = auto (fp8 checkpoint if present)
 ```
 
-### VRAM reality check
+#### VRAM reality check (why Ovi is parked)
 
 Upstream Ovi documents ~32 GB peak for bf16 and ~24 GB for fp8, above a 16 GB
 Kaggle T4/P100. The loader therefore defaults to the **fp8** checkpoint (which
@@ -69,8 +164,19 @@ loop, and enforces a VRAM admission floor **before** touching weights
 fails fast instead of being OOM-killed mid-run.
 
 **Status:** the wiring, contracts and orchestration are implemented and tested
-offline, but **no real checkpoint inference has been executed yet**. Treat the
-first GPU run as the acceptance gate.
+offline, but **no real checkpoint inference has been executed yet**. Ovi hardware
+testing is deferred until the AnimateDiff backend is proven.
+
+### Next steps
+
+1. `VideoBackend` interface + normalized `VideoResult` (+ `tail_frame_paths`).
+2. Backend-neutral `VideoGenerationRequest`; move Ovi knobs into typed `OviSettings`.
+3. `VideoBackendRegistry` with a `video.backend` config key (`animatediff` | `ovi`; **no `auto` until Ovi is validated**).
+4. Wrap the existing Ovi implementation as `OviBackend` (no Ovi math changes).
+5. Build `AnimateDiffBackend` on SD1.5 + MotionAdapter with CPU offload / VAE slicing.
+6. Keyframe-domain compatibility (SD1.5-compatible conditioning frame) — kept behind a backend hook so `GenerationManager` never learns which image model produced the frame.
+7. Backend contract tests + mocked end-to-end wiring tests.
+8. First **real** 8-frame / 10-step inference on the local GPU, then tune from measurements.
 
 ---
 
