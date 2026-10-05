@@ -4,7 +4,7 @@ from PIL import Image
 class TrajectoryEncoder:
     """
     Extracts trajectory/motion latent from the previous frame using standard VAE encoding 
-    to provide structural continuity offset without heavy IP-Adapter overhead.
+    to prmultigenaide structural continuity offset without heavy IP-Adapter overhead.
     """
     def encode(self, pipe, previous_frame: Image.Image) -> torch.Tensor:
         """

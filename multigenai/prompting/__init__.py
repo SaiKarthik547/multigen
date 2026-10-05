@@ -1,7 +1,7 @@
 """
 Prompting Subsystem — Phase 9 Advanced Prompt Processing Engine
 
-Provides token-safe segmentation, semantic analysis, segment expansion,
+Prmultigenaides token-safe segmentation, semantic analysis, segment expansion,
 and negative prompt management for arbitrarily long user prompts and scripts.
 
 Public API:

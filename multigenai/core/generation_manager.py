@@ -171,252 +171,97 @@ class GenerationManager:
         self,
         request: "VideoGenerationRequest",
         conditioning_image_path: Optional[str] = None,
-        character_reference_path: Optional[str] = None,
+        character_id: Optional[str] = None,
     ) -> "VideoResult":
         """
-        Orchestrate SVD-XT/AnimateDiff video generation with Phase 13 architecture.
-
-        Phase 13 Architecture Contract:
-        1. Scene Planning: Use ScenePlanner to split narrative into scenes.
-        2. Anchor Generation: Use SDXL (ImageEngine) to generate explicit Character
-           and Environment anchors.
-        3. Strict Isolation: Hard unload SDXL, gc.collect(), IPC collect. VRAM < 2GB.
-        4. Video Generation: Boot VideoEngine (AnimateDiff) and iterate over scenes.
+        Orchestrate Wan 2.2 Unified Cinematic Pass.
+        
+        Workflow:
+        1. Contextual Scene Planning (using MGOS ScenePlanner).
+        2. Character Identity Retrieval (via IdentityResolver).
+        3. Segmented Synthesis (Wan 2.2 for 81-frame cinematic segments).
+        4. Synchronized Audio Pass (MMAudio).
+        5. Temporal Handover (Latent persistence across shots).
         """
-        from multigenai.core.model_lifecycle import ModelLifecycle
         from multigenai.core.temporal_state import TemporalState
         from multigenai.llm.scene_planner import ScenePlanner
-        from multigenai.prompting.prompt_analyzer import PromptAnalyzer
-        from multigenai.llm.schema_validator import ImageGenerationRequest
-        from PIL import Image
-        import copy
         import torch
-        import gc
-
-        LOG.info("GenerationManager: Starting Phase 13 Video Generation pipeline.")
-
-        # --- Phase 13: Scene Planning ---
+        
+        LOG.info("GenerationManager: Initiating Wan 2.2 Unified Cinematic Pass.")
+        
+        # 1. Planning
         planner = ScenePlanner(getattr(self._ctx, "llm", None))
         video_plan = planner.plan(request.prompt)
-        seg_dir = None # Prevent undefined variable during fallback
         
-        # Reset scene memory at the start of a generation plan
         self._ctx.scene_memory.reset()
-
-        if character_reference_path:
-            LOG.info(f"GenerationManager: Loading user character reference from {character_reference_path}")
-            self._ctx.scene_memory.update(character_reference_path=character_reference_path)
-
-        # STEP 1: ANCHOR GENERATION (SDXL)
-        structure = PromptAnalyzer().analyze(request.prompt)
-        
-        # Build anchor prompts
-        char_subject = structure.subjects[0] if structure.subjects else request.prompt
-        char_prompt = f"cinematic portrait, {char_subject}, highly detailed, 8k resolution"
-        
-        env_desc = ", ".join(structure.environment) if structure.environment else "cinematic background"
-        env_style = ", ".join(structure.style) if structure.style else "photorealistic"
-        env_prompt = f"wide establishing shot, {env_desc}, {env_style}, highly detailed"
-
-        if conditioning_image_path:
-            # If user provided a starting image, we use it directly as the environment/starting anchor
-            LOG.info("GenerationManager: Using provided conditioning image as environment anchor.")
-            self._ctx.scene_memory.update(reference_frame_path=conditioning_image_path)
-        else:
-            LOG.info("GenerationManager: Booting ImageEngine for Anchor Generation...")
-            
-            original_unload = self._ctx.behaviour.auto_unload_after_gen
-            self._ctx.behaviour.auto_unload_after_gen = False
-            
-            image_engine = self.image_engine
-            
-            try:
-                # 1A. Character Anchor
-                if not character_reference_path:
-                    LOG.info(f"GenerationManager: Generating Character Anchor: {char_prompt}")
-                    char_req = ImageGenerationRequest(
-                        prompt=char_prompt, width=request.width, height=request.height, seed=request.seed
-                    )
-                    char_res = image_engine.run(char_prompt, getattr(request, "negative_prompt", ""), char_req)
-                    if char_res.success:
-                        self._ctx.scene_memory.update(character_reference_path=char_res.path)
-                    else:
-                        LOG.error("GenerationManager: Character Anchor generation failed.")
-                        return self._video_fail(request, char_res.error)
-
-                # 1B. Environment Anchor
-                LOG.info(f"GenerationManager: Generating Environment Anchor: {env_prompt}")
-                env_req = ImageGenerationRequest(
-                    prompt=env_prompt, width=request.width, height=request.height, seed=request.seed
-                )
-                env_res = image_engine.run(env_prompt, getattr(request, "negative_prompt", ""), env_req)
-                if env_res.success:
-                    self._ctx.scene_memory.update(reference_frame_path=env_res.path, environment_prompt=env_prompt)
-                else:
-                    LOG.error("GenerationManager: Environment Anchor generation failed.")
-                    return self._video_fail(request, env_res.error)
-
-                # Phase 14: Extract Identity Latent while ImageEngine is hot
-                char_path = self._ctx.scene_memory.get().character_reference_path
-                extracted_identity_latent = None
-                if char_path is not None:
-                    try:
-                        char_img = Image.open(char_path).convert("RGB")
-                        from multigenai.identity.identity_latent_encoder import IdentityLatentEncoder
-                        encoder = IdentityLatentEncoder()
-                        id_latent = encoder.encode(image_engine.pipe, char_img)
-                        extracted_identity_latent = id_latent.detach().cpu().clone()
-                        LOG.info("GenerationManager: Successfully extracted ILC Character Latent.")
-                    except Exception as e:
-                        LOG.warning(f"GenerationManager: Failed to extract identity latent: {e}")
-
-            finally:
-                self._ctx.behaviour.auto_unload_after_gen = original_unload
-                
-        # --- HARD UNLOAD PROTOCOL (PHASE 13) ---
-        LOG.info("GenerationManager: Executing Hard Unload of ImageEngine to free VRAM...")
-        if hasattr(self, "image_engine") and self.image_engine:
-            ModelLifecycle.safe_unload(self.image_engine.pipe)
-            # Nullify internal dict reference if generated dynamically, or clear explicitly
-            self.image_engine.pipe = None
-
-        if hasattr(self, "_engines") and "image" in self._engines:
-            del self._engines["image"]
-
-        ModelLifecycle.enforce_cleanup("GenerationManager (ImageEngine > VideoEngine)")
-        if torch.cuda.is_available():
-            LOG.info(f"GenerationManager VRAM Log (Pre-VideoBoot): {torch.cuda.memory_reserved()/1024**2:.0f} MB")
-
-        # STEP 2: VIDEO GENERATION (AnimateDiff)
-        LOG.info("GenerationManager: Booting isolated VideoEngine (AnimateDiff) for scenes...")
-        from multigenai.engines.video_engine.engine import VideoEngine
-        
-        original_unload = self._ctx.behaviour.auto_unload_after_gen
-        self._ctx.behaviour.auto_unload_after_gen = False
-        
-        video_engine = VideoEngine(self._ctx)
         temporal_state = TemporalState()
         
-        # Inject Identity Latent
-        if 'extracted_identity_latent' in locals() and extracted_identity_latent is not None:
-            temporal_state.identity_latent = extracted_identity_latent
-            
-        seg_frames = []
-        processor = self._build_processor(model_name="animatediff")
-        total_frame_count = 0  # Phase 16: Track sequence length for safety reset
+        # 2. Engines Boot (VRAM isolated)
+        # 2. Joint Fusion Engine Boot (Phase 4: Synthesis Depth)
+        from multigenai.engines.fusion_engine.engine import FusionEngine
+        fusion_engine = FusionEngine(self._ctx)
+        
+        video_segments = []
+        audio_segments = []
         
         try:
             for scene in video_plan.scenes:
-                scene_state = self._ctx.scene_memory.get()
-
-                # Enrich scene description with environment anchor
-                raw_prompt = scene.description
-                if scene_state.environment_prompt and scene_state.environment_prompt not in raw_prompt:
-                    raw_prompt += ", " + scene_state.environment_prompt
-
-                # Phase 14: Token Safety
-                seg_plan = processor.process(raw_prompt, force_single_segment=True)
-                seg_prompt = seg_plan.segments[0].positive if seg_plan.segments else raw_prompt
-
-                # Phase 14: Seed differentiation
-                scene_seed = request.seed + temporal_state.scene_index if request.seed is not None else None
-                seg_request = request.model_copy(update={"prompt": seg_prompt, "seed": scene_seed})
-
-                # Phase 15: Keyframe Anchor Strategy
-                # Each scene generates a dedicated SDXL keyframe used to initialize
-                # the AnimateDiff latent — this is the biggest consistency upgrade.
-                keyframe_path = scene.keyframe_path or scene_state.reference_frame_path
-                keyframe_latent = None
-
-                if keyframe_path:
-                    if video_engine.pipe is None:
-                        video_engine._load_model()
-                    
-                    try:
-                        with Image.open(keyframe_path) as kf_img:
-                            kf_img_rgb = kf_img.copy().convert("RGB")
-                        from multigenai.identity.identity_latent_encoder import IdentityLatentEncoder
-                        keyframe_latent = IdentityLatentEncoder().encode(video_engine.pipe, kf_img_rgb)
-                        LOG.info(f"GenerationManager: Keyframe latent extracted for scene {scene.scene_id}.")
-                    except Exception as ke:
-                        LOG.warning(f"GenerationManager: Keyframe encoding failed ({ke}), no latent seed.")
-
-                # Phase 15: pull global latent forward as prior context
-                if temporal_state.global_latent is not None:
-                    temporal_state.previous_latent = temporal_state.global_latent
-
-                # Extract starting frame path
-                c_path = scene_state.reference_frame_path
-
-                LOG.info(f"GenerationManager: Generating scene {scene.scene_id}: {seg_prompt}")
-                frames, new_latents, out_path, seed = video_engine.generate_frames(
-                    seg_request,
-                    c_path,
+                LOG.info(f"GenerationManager: Joint Fusion Pass - Scene {scene.scene_id}")
+                
+                # Scene-specific request
+                seg_request = request.model_copy(update={
+                    "prompt": scene.description,
+                    "character_id": character_id or request.character_id
+                })
+                
+                # A. Deep Synchronization (Wan 2.2 + MMAudio)
+                # This performs a unified score prediction for visuals and sound
+                fusion_res = fusion_engine.run(
+                    request=seg_request,
+                    image_path=scene.keyframe_path or conditioning_image_path,
                     temporal_state=temporal_state,
-                    scene_index=temporal_state.scene_index,
-                    keyframe_latent=keyframe_latent,
+                    dialogue=scene.dialogue
                 )
-
-                # Fallback object wrapping for compatibility with later stitching
-                from types import SimpleNamespace
-                seg_obj = SimpleNamespace(positive=seg_prompt, negative="", index=temporal_state.scene_index)
-                seg_frames.append((seg_obj, frames, out_path, seed))
-
-                # Update Temporal State
-                if frames:
-                    total_frame_count += len(frames)
-
-                    # Phase 16: Long sequence safety to prevent accumulating drift
-                    if total_frame_count > 600:
-                        LOG.warning(f"GenerationManager: Sequence exceeded 600 frames ({total_frame_count}). Forcing keyframe flush to kill drift.")
-                        temporal_state.global_latent = None
-                        temporal_state.previous_latent = None
-                        temporal_state.latent_velocity = None
-                        total_frame_count = 0
-
-                    last_frame = frames[-1]
-                    if isinstance(last_frame, (str, pathlib.Path)):
-                        with Image.open(last_frame) as img:
-                            temporal_state.previous_frame = img.copy().convert("RGB")
-                    else:
-                        temporal_state.previous_frame = last_frame.copy().convert("RGB")
-
-                    # Phase 15: persist global + previous latent for next scene
-                    # VideoEngine already returns CPU-detached tensors — no .cpu() needed
-                    if temporal_state.global_latent is not None:
-                         temporal_state.previous_latent = new_latents  # already CPU
-                         temporal_state.global_latent = temporal_state.previous_latent
-                    else: 
-                         # We just reset latents to kill drift, so start the chain fresh
-                         temporal_state.previous_latent = new_latents
-                         temporal_state.global_latent = temporal_state.previous_latent
-
-                    temporal_state.scene_index += 1
-
-                    ref_path = str(last_frame) if isinstance(last_frame, (str, pathlib.Path)) else None
-                    self._ctx.scene_memory.update(
-                        reference_frame_path=ref_path,
-                        temporal_state=copy.deepcopy(temporal_state)
-                    )
-
-            # Final destruction of video engine
-            video_engine._unload_model()
-            video_engine = None
-
-            ModelLifecycle.enforce_cleanup("GenerationManager (VideoEngine > InterpolationEngine)")
-            ModelLifecycle.assert_vram_clean(threshold_gb=2.5, context="post-VideoEngine")
-            if torch.cuda.is_available():
-                LOG.info(f"GenerationManager VRAM Log (Post-VideoBoot): {torch.cuda.memory_reserved()/1024**2:.0f} MB")
-                    
-        except Exception as exc:
-            LOG.error(f"GenerationManager: Video generation failed: {exc}", exc_info=True)
-            return self._video_fail(request, str(exc))
-        finally:
-            self._ctx.behaviour.auto_unload_after_gen = original_unload
-            if video_engine:
-                 video_engine._unload_model()
+                
+                if not fusion_res.success:
+                    LOG.error(f"GenerationManager: Scene {scene.scene_id} failed: {fusion_res.error}")
+                    continue
+                
+                # B. Result Aggregation
+                video_segments.append(fusion_res.video_path)
+                audio_segments.append(fusion_res.audio_path)
+                
+                # C. Temporal Handover (Update latent for next scene consistency)
+                temporal_state.global_latent = fusion_res.latents
+                temporal_state.scene_index += 1
+                
+            # D. Final Cinematic Movie Stitching
+            from multigenai.utils.movie_utils import stitch_cinematic_movie
+            final_movie_path = self._ctx.settings.output_dir / f"mgos_movie_{int(torch.randint(0, 1000, (1,)).item())}.mp4"
+            stitch_cinematic_movie(video_segments, audio_segments, str(final_movie_path))
             
-            ModelLifecycle.enforce_cleanup("GenerationManager (Video Pipeline Cleanup)")
+            from multigenai.engines.video_engine.engine import VideoResult
+            return VideoResult(
+                path=str(final_movie_path),
+                frame_count=len(video_segments) * 81,
+                fps=request.fps,
+                seed=request.seed or 0,
+                success=True
+            )
+            
+            # Return result wrapping the final stitched movie
+            from multigenai.engines.video_engine.engine import VideoResult
+            return VideoResult(
+                path=str(final_movie_path),
+                frame_count=len(video_segments) * 81,
+                fps=request.fps,
+                seed=request.seed or 0,
+                success=True
+            )
+            
+        except Exception as e:
+            LOG.error(f"GenerationManager: Cinematic pass failed: {e}")
+            return self._video_fail(request, str(e))
 
         # STEP 3 & 4: Interpolation and mp4 Encoding
         results: List["VideoResult"] = []

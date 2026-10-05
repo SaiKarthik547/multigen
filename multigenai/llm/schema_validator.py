@@ -2,7 +2,7 @@
 Pydantic v2 schemas for all generation request types.
 
 All engines receive one of these validated request objects.
-The schema enforces required/optional fields and provides
+The schema enforces required/optional fields and prmultigenaides
 sane defaults so callers don't need to specify every field.
 """
 
@@ -119,10 +119,11 @@ class VideoGenerationRequest(BaseModel):
         default="",
         description="Optional subtle motion suffix appended to prompt (e.g. 'subtle walking motion')."
     )
-    num_inference_steps: int = Field(
+    sampling_steps: int = Field(
         default=25, ge=10, le=100,
-        description="Denoising steps per frame. 25 is the native SVD-XT default."
+        description="Denoising steps per frame. 25 is a sane default for Wan 2.2 / MGOS."
     )
+    guidance_scale: float = Field(default=5.0, ge=1.0, le=20.0)
 
     # --- Phase 8: Temporal Enhancement (RIFE interpolation) ---
     interpolate: bool = Field(
@@ -157,6 +158,8 @@ class AudioGenerationRequest(BaseModel):
     emotion: str = "neutral"           # neutral | happy | sad | angry | fearful
     duration_seconds: float = Field(default=5.0, ge=0.5, le=300.0)
     output_format: str = "wav"         # wav | mp3 | flac
+    sampling_steps: int = Field(default=25, ge=10, le=100)
+    guidance_scale: float = Field(default=4.5, ge=1.0, le=20.0)
     # --- Phase 6: Voice identity (optional — advisory, not enforced yet) ---
     identity_name: Optional[str] = None
     identity_strength: float = Field(

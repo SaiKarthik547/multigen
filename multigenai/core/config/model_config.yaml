@@ -1,11 +1,13 @@
 # MultiGenAI — Model Registry Configuration
 # ---------------------------------------------------------------------------
-# This file maps model aliases to their HuggingFace repository IDs.
+# This file maps model aliases to their local or dataset-mounted paths.
 # ---------------------------------------------------------------------------
 
-image_model: RunDiffusion/Juggernaut-XL-v9
-video_model: runwayml/stable-diffusion-v1-5
-motion_adapter: guoyww/animatediff-motion-adapter-v1-5-2
-controlnet_depth: diffusers/controlnet-depth-sdxl-1.0
-ip_adapter: h94/IP-Adapter
-ip_adapter_weight: ip-adapter-plus_sdxl_vit-h.safetensors
+image_model: /kaggle/input/mgos-weights/Juggernaut-XL-v9
+wan_model_path: /kaggle/input/mgos-weights/Wan2.2-TI2V-5B
+mmaudio_model_path: /kaggle/input/mgos-weights/MMAudio
+shared_t5_path: /kaggle/input/mgos-weights/Wan2.2-TI2V-5B/models_t5_umt5-xxl-enc-bf16.pth
+t5_tokenizer_path: /kaggle/input/mgos-weights/Wan2.2-TI2V-5B/google/umt5-xxl
+controlnet_depth: /kaggle/input/mgos-weights/controlnet-depth-sdxl-1.0
+identity_model_path: /kaggle/input/mgos-weights/Identity
+fusion_adapter_path: /kaggle/input/mgos-weights/fusion_adapter

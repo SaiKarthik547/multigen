@@ -27,13 +27,13 @@ orchestration:
 
 # ---------------------------------------------------------------------------
 # LLM Intelligence Layer
-# Set enabled: true and configure a provider to activate LLM enhancement.
-# Without a provider the system falls back to rule-based logic permanently.
+# Set enabled: true and configure a prmultigenaider to activate LLM enhancement.
+# Without a prmultigenaider the system falls back to rule-based logic permanently.
 # ---------------------------------------------------------------------------
 llm:
   enabled: false                  # true | false — LLM never mandatory
-  provider: local                 # local | api
-  api_mode: gemini                # gemini | openai  (only used when provider: api)
+  prmultigenaider: local                 # local | api
+  api_mode: gemini                # gemini | openai  (only used when prmultigenaider: api)
   model: mistral                  # Ollama model or API model ID
   endpoint: http://localhost:11434/api/generate
   api_key_env: MGOS_LLM_API_KEY   # Name of the env var holding the API key

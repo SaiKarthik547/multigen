@@ -27,7 +27,7 @@ _OPTIONAL_LIBS = [
     ("Transformers",  "transformers"),
     ("Accelerate",    "accelerate"),
     ("Pillow",        "PIL"),
-    ("MoviePy",       "moviepy"),
+    ("moviePy",       "moviepy"),
     ("NLTK",          "nltk"),
     ("Matplotlib",    "matplotlib"),
     ("python-pptx",   "pptx"),

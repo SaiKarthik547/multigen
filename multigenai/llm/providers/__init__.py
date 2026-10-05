@@ -1,12 +1,12 @@
 """
-LLM Providers sub-package.
+LLM Prmultigenaiders sub-package.
 
-Exposes the provider ABC and both concrete implementations.
+Exposes the prmultigenaider ABC and both concrete implementations.
 All imports are guarded — never import at top level from here.
 """
 
-from multigenai.llm.providers.base import LLMProvider
-from multigenai.llm.providers.local_provider import LocalLLMProvider
-from multigenai.llm.providers.api_provider import APILLMProvider
+from multigenai.llm.prmultigenaiders.base import LLMPrmultigenaider
+from multigenai.llm.prmultigenaiders.local_prmultigenaider import LocalLLMPrmultigenaider
+from multigenai.llm.prmultigenaiders.api_prmultigenaider import APILLMPrmultigenaider
 
-__all__ = ["LLMProvider", "LocalLLMProvider", "APILLMProvider"]
+__all__ = ["LLMPrmultigenaider", "LocalLLMPrmultigenaider", "APILLMPrmultigenaider"]

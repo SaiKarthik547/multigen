@@ -8,7 +8,7 @@ Phase 2: LLM-driven structured breakdown using structured_generate()
 Design rules:
   - LLM path uses structured_generate() with a JSON schema — deterministic
   - Falls back to heuristic split on any LLM failure
-  - Provider injected via constructor (DI)
+  - Prmultigenaider injected via constructor (DI)
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from multigenai.core.logging.logger import get_logger
 
 if TYPE_CHECKING:
-    from multigenai.llm.providers.base import LLMProvider
+    from multigenai.llm.prmultigenaiders.base import LLMPrmultigenaider
 
 LOG = get_logger(__name__)
 
@@ -55,6 +55,7 @@ class SceneDescriptor:
     keyframe_prompt: str = ""   # Phase 15: used for keyframe anchor generation
     motion_prompt: str = ""     # Phase 15: camera / motion description for AnimateDiff
     keyframe_path: str = ""     # Phase 15: path to the generated keyframe anchor image
+    dialogue: Optional[str] = None # Phase 17: Character dialogue text for MMAudio
 
     def __post_init__(self):
         if self.characters is None:
@@ -94,6 +95,10 @@ class _SceneItem(BaseModel):
         default=3.0,
         description="Approximate duration in seconds"
     )
+    dialogue: Optional[str] = Field(
+        default=None,
+        description="Specific character dialogue text to be spoken in the scene"
+    )
 
 
 class _SceneListResponse(BaseModel):
@@ -111,7 +116,7 @@ Script:
 {script}
 
 Return a JSON object with the key "scenes" containing an array of scene objects.
-Each scene must have: title, description, time_of_day, location, characters (list), duration_hint (float seconds).
+Each scene must have: title, description, time_of_day, location, characters (list), duration_hint (float seconds), and dialogue (string, optional).
 """
 
 _VALID_TIMES = {"dawn", "morning", "noon", "afternoon", "dusk", "night"}
@@ -121,7 +126,7 @@ class ScenePlanner:
     """
     Splits a narrative script into a sequence of SceneDescriptors.
 
-    When a LLMProvider is injected, uses structured_generate() for
+    When a LLMPrmultigenaider is injected, uses structured_generate() for
     rich, character-aware scene breakdown. Falls back to heuristic
     sentence-splitting on any LLM failure.
 
@@ -130,7 +135,7 @@ class ScenePlanner:
         scenes = planner.plan("A knight rides through a forest. He finds a sword.")
 
     Usage (LLM-backed):
-        planner = ScenePlanner(provider=ctx.llm)
+        planner = ScenePlanner(prmultigenaider=ctx.llm)
         scenes = planner.plan("A knight rides through a forest. He finds a sword.")
     """
 
@@ -144,14 +149,14 @@ class ScenePlanner:
         "night": ["night", "dark", "midnight", "evening"],
     }
 
-    def __init__(self, provider: Optional["LLMProvider"] = None) -> None:
+    def __init__(self, prmultigenaider: Optional["LLMPrmultigenaider"] = None) -> None:
         """
         Args:
-            provider: Optional LLM backend. If None, heuristic path is used.
+            prmultigenaider: Optional LLM backend. If None, heuristic path is used.
         """
-        self._provider = provider
-        if provider:
-            LOG.debug(f"ScenePlanner: LLM provider set ({type(provider).__name__})")
+        self._prmultigenaider = prmultigenaider
+        if prmultigenaider:
+            LOG.debug(f"ScenePlanner: LLM prmultigenaider set ({type(prmultigenaider).__name__})")
 
     # ------------------------------------------------------------------
     # Public API
@@ -161,7 +166,7 @@ class ScenePlanner:
         """
         Parse a script string into a structured VideoGenerationPlan.
 
-        Routes to plan_with_llm() when a provider is set; falls back to
+        Routes to plan_with_llm() when a prmultigenaider is set; falls back to
         heuristic splitting on failure.
 
         Args:
@@ -174,7 +179,7 @@ class ScenePlanner:
         MAX_SCENES = 7  # Phase 15: raised to 7 for richer multi-scene generation
         scenes = []
         
-        if self._provider is not None:
+        if self._prmultigenaider is not None:
             try:
                 scenes = self.plan_with_llm(script, default_duration)
             except Exception as exc:
@@ -204,7 +209,7 @@ class ScenePlanner:
         LLM-driven structured scene planning.
 
         Uses structured_generate() with _SceneListResponse schema.
-        Malformed JSON / validation failure → ProviderResponseFormatError
+        Malformed JSON / validation failure → PrmultigenaiderResponseFormatError
         (caught by plan() and falls back to heuristic).
 
         Args:
@@ -215,14 +220,14 @@ class ScenePlanner:
             Ordered list of SceneDescriptor objects.
 
         Raises:
-            ProviderResponseFormatError: if LLM output cannot be validated.
-            ProviderUnavailableError: if provider is unreachable.
+            PrmultigenaiderResponseFormatError: if LLM output cannot be validated.
+            PrmultigenaiderUnavailableError: if prmultigenaider is unreachable.
         """
-        if self._provider is None:
+        if self._prmultigenaider is None:
             return self._heuristic_plan(script, default_duration)
 
         prompt = _SCENE_PLANNING_PROMPT_TEMPLATE.format(script=script)
-        result: _SceneListResponse = self._provider.structured_generate(
+        result: _SceneListResponse = self._prmultigenaider.structured_generate(
             prompt, schema=_SceneListResponse
         )
 
@@ -244,6 +249,7 @@ class ScenePlanner:
                 time_of_day=tod,
                 duration_hint=duration_hint,
                 notes=item.title,
+                dialogue=item.dialogue
             ))
 
         LOG.info(f"ScenePlanner (LLM): split script into {len(scenes)} scenes")

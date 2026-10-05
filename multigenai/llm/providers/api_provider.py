@@ -1,5 +1,5 @@
 """
-APILLMProvider — Cloud LLM API backend (Gemini / OpenAI).
+APILLMPrmultigenaider — Cloud LLM API backend (Gemini / OpenAI).
 
 Uses plain requests.post — no SDK, no vendor lock-in.
 
@@ -8,7 +8,7 @@ API key is read from an env var whose NAME is stored in config
 hardcoded or stored in config files.
 
 Architecture:
-  APILLMProvider.generate()
+  APILLMPrmultigenaider.generate()
     → _call_openai()   if api_mode == "openai"
     → _call_gemini()   if api_mode == "gemini"
 
@@ -21,7 +21,7 @@ import os
 from typing import Optional
 
 from multigenai.core.logging.logger import get_logger
-from multigenai.llm.providers.base import LLMProvider
+from multigenai.llm.prmultigenaiders.base import LLMPrmultigenaider
 
 LOG = get_logger(__name__)
 
@@ -34,23 +34,23 @@ _DEFAULT_MODEL_GEMINI = "gemini-1.5-flash"
 _DEFAULT_TIMEOUT = 60.0
 
 
-class APILLMProvider(LLMProvider):
+class APILLMPrmultigenaider(LLMPrmultigenaider):
     """
-    LLM provider that calls a cloud API (OpenAI or Gemini).
+    LLM prmultigenaider that calls a cloud API (OpenAI or Gemini).
 
     Config-driven — no vendor logic mixed inline.
 
     Usage (via config):
         llm:
-          provider: api
+          prmultigenaider: api
           api_mode: gemini               # openai | gemini
           model: gemini-1.5-flash
           api_key_env: MGOS_LLM_API_KEY  # env var holding the key
           timeout_seconds: 60
 
     Usage (direct):
-        provider = APILLMProvider(api_mode="openai", api_key_env="OPENAI_API_KEY")
-        text = provider.generate("Enhance this prompt: a stormy sea")
+        prmultigenaider = APILLMPrmultigenaider(api_mode="openai", api_key_env="OPENAI_API_KEY")
+        text = prmultigenaider.generate("Enhance this prompt: a stormy sea")
     """
 
     def __init__(
@@ -80,13 +80,13 @@ class APILLMProvider(LLMProvider):
             )
 
         LOG.debug(
-            f"APILLMProvider configured: api_mode={self._api_mode} "
+            f"APILLMPrmultigenaider configured: api_mode={self._api_mode} "
             f"model={self._model} key_env={api_key_env} "
             f"key_present={'yes' if self._api_key else 'NO'}"
         )
 
     # ------------------------------------------------------------------
-    # LLMProvider interface
+    # LLMPrmultigenaider interface
     # ------------------------------------------------------------------
 
     def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
@@ -94,15 +94,15 @@ class APILLMProvider(LLMProvider):
         Dispatch to the configured API backend.
 
         Raises:
-            ProviderAuthError:       on missing key or 401/403.
-            ProviderTimeoutError:    on request timeout.
-            ProviderResponseError:   on other HTTP errors.
-            ProviderUnavailableError: on network failure.
+            PrmultigenaiderAuthError:       on missing key or 401/403.
+            PrmultigenaiderTimeoutError:    on request timeout.
+            PrmultigenaiderResponseError:   on other HTTP errors.
+            PrmultigenaiderUnavailableError: on network failure.
         """
-        from multigenai.core.exceptions import ProviderAuthError
+        from multigenai.core.exceptions import PrmultigenaiderAuthError
 
         if not self._api_key:
-            raise ProviderAuthError(self._endpoint)
+            raise PrmultigenaiderAuthError(self._endpoint)
 
         if self._api_mode == "openai":
             return self._call_openai(prompt, system_prompt)
@@ -118,14 +118,14 @@ class APILLMProvider(LLMProvider):
         try:
             import requests
         except ImportError:
-            from multigenai.core.exceptions import ProviderUnavailableError
-            raise ProviderUnavailableError("'requests' not installed.")
+            from multigenai.core.exceptions import PrmultigenaiderUnavailableError
+            raise PrmultigenaiderUnavailableError("'requests' not installed.")
 
         from multigenai.core.exceptions import (
-            ProviderAuthError,
-            ProviderResponseError,
-            ProviderTimeoutError,
-            ProviderUnavailableError,
+            PrmultigenaiderAuthError,
+            PrmultigenaiderResponseError,
+            PrmultigenaiderTimeoutError,
+            PrmultigenaiderUnavailableError,
         )
 
         messages = []
@@ -151,24 +151,24 @@ class APILLMProvider(LLMProvider):
                 timeout=self._timeout,
             )
         except requests.Timeout:
-            raise ProviderTimeoutError(self._endpoint, self._timeout)
+            raise PrmultigenaiderTimeoutError(self._endpoint, self._timeout)
         except requests.ConnectionError as exc:
-            raise ProviderUnavailableError(
+            raise PrmultigenaiderUnavailableError(
                 f"Network error reaching OpenAI: {exc}",
                 details={"endpoint": self._endpoint},
             ) from exc
 
         if resp.status_code in (401, 403):
-            raise ProviderAuthError(self._endpoint)
+            raise PrmultigenaiderAuthError(self._endpoint)
         if not resp.ok:
-            raise ProviderResponseError(self._endpoint, resp.status_code, resp.text)
+            raise PrmultigenaiderResponseError(self._endpoint, resp.status_code, resp.text)
 
         data = resp.json()
         try:
             return data["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError) as exc:
-            from multigenai.core.exceptions import ProviderResponseFormatError
-            raise ProviderResponseFormatError(
+            from multigenai.core.exceptions import PrmultigenaiderResponseFormatError
+            raise PrmultigenaiderResponseFormatError(
                 "Unexpected OpenAI response structure",
                 details={"keys": list(data.keys())},
             ) from exc
@@ -178,14 +178,14 @@ class APILLMProvider(LLMProvider):
         try:
             import requests
         except ImportError:
-            from multigenai.core.exceptions import ProviderUnavailableError
-            raise ProviderUnavailableError("'requests' not installed.")
+            from multigenai.core.exceptions import PrmultigenaiderUnavailableError
+            raise PrmultigenaiderUnavailableError("'requests' not installed.")
 
         from multigenai.core.exceptions import (
-            ProviderAuthError,
-            ProviderResponseError,
-            ProviderTimeoutError,
-            ProviderUnavailableError,
+            PrmultigenaiderAuthError,
+            PrmultigenaiderResponseError,
+            PrmultigenaiderTimeoutError,
+            PrmultigenaiderUnavailableError,
         )
 
         # Gemini uses ?key= query param
@@ -198,24 +198,24 @@ class APILLMProvider(LLMProvider):
         try:
             resp = requests.post(url, json=payload, timeout=self._timeout)
         except requests.Timeout:
-            raise ProviderTimeoutError(self._endpoint, self._timeout)
+            raise PrmultigenaiderTimeoutError(self._endpoint, self._timeout)
         except requests.ConnectionError as exc:
-            raise ProviderUnavailableError(
+            raise PrmultigenaiderUnavailableError(
                 f"Network error reaching Gemini: {exc}",
                 details={"endpoint": self._endpoint},
             ) from exc
 
         if resp.status_code in (401, 403):
-            raise ProviderAuthError(self._endpoint)
+            raise PrmultigenaiderAuthError(self._endpoint)
         if not resp.ok:
-            raise ProviderResponseError(self._endpoint, resp.status_code, resp.text)
+            raise PrmultigenaiderResponseError(self._endpoint, resp.status_code, resp.text)
 
         data = resp.json()
         try:
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
         except (KeyError, IndexError) as exc:
-            from multigenai.core.exceptions import ProviderResponseFormatError
-            raise ProviderResponseFormatError(
+            from multigenai.core.exceptions import PrmultigenaiderResponseFormatError
+            raise PrmultigenaiderResponseFormatError(
                 "Unexpected Gemini response structure",
                 details={"keys": list(data.keys())},
             ) from exc

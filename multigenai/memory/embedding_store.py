@@ -1,7 +1,7 @@
 """
 EmbeddingStore — In-memory vector embedding store.
 
-Phase 3 stub: provides the interface used by all engines.
+Phase 3 stub: prmultigenaides the interface used by all engines.
 Phase 3 will replace the in-memory dict with a real vector database
 (ChromaDB, FAISS, or Pinecone) while keeping this interface identical.
 """

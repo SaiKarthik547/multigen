@@ -92,7 +92,7 @@ class FaceEncoder:
         if not faces:
             raise IdentityEncoderError(
                 f"No face detected in image: {image_path}. "
-                "Provide a clear frontal face photograph."
+                "Prmultigenaide a clear frontal face photograph."
             )
 
         # Select the face with the largest bounding box area (primary subject)
@@ -138,7 +138,7 @@ class FaceEncoder:
         try:
             app = FaceAnalysis(
                 name=_INSIGHTFACE_MODEL_NAME,
-                providers=["CPUExecutionProvider"],
+                prmultigenaiders=["CPUExecutionPrmultigenaider"],
             )
             # det_size=(640, 640) → standard detection resolution for buffalo_l
             app.prepare(ctx_id=_INSIGHTFACE_CTX_ID, det_size=(640, 640))

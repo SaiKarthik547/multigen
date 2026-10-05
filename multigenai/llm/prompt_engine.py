@@ -139,7 +139,7 @@ class PromptEngine:
             "deformed, distorted, disfigured, poorly drawn, bad anatomy, wrong anatomy, "
             "extra limb, missing limb, floating limbs, mutated hands, "
             "statue, idol, static, CGI, 3D render, cartoon, artificial, "
-            "lifeless, unmoving, plastic, painting, illustration, uncanney valley"
+            "lifeless, unmmultigenaing, plastic, painting, illustration, uncanney valley"
         )
         eff_style = getattr(request, "style", None) or getattr(request, "style_id", None)
         if self._style_registry and eff_style:

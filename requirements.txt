@@ -27,3 +27,10 @@ torch-directml
 # Pinned: later insightface versions frequently break ABI compatibility with onnxruntime
 insightface==0.7.3
 onnxruntime==1.17.3
+
+# Phase 15: Wan 2.2 / MMAudio / Fusion Synergy
+einops
+scipy
+omegaconf
+safetensors
+librosa

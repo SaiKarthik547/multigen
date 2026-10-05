@@ -1,7 +1,7 @@
 """
 DeviceManager — Hardware detection and selection for MultiGenAI OS.
 
-Provides:
+Prmultigenaides:
   - Best available torch.device detection (CUDA → DirectML → CPU)
   - VRAM reporting (free, total in GB)
   - Safe operation when PyTorch is not installed (CPU-only environments)

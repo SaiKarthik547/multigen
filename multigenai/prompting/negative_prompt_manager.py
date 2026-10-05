@@ -33,7 +33,7 @@ _BASE_NEGATIVE = (
     "distorted anatomy, extra fingers, malformed hands, overexposed, "
     "noise, jpeg artifacts, grainy, flat, ugly, oversaturated, "
     "statue, idol, static, CGI, 3D render, cartoon, artificial, "
-    "lifeless, unmoving, plastic, painting, illustration, uncanny valley, "
+    "lifeless, unmmultigenaing, plastic, painting, illustration, uncanny valley, "
     "glitch, low resolution, amateur, poorly drawn"
 )
 
