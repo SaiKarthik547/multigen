@@ -82,6 +82,32 @@ def test_unload_all_with_nothing_loaded_is_a_noop(fresh_registry, teardown_spy):
     assert teardown_spy == []
 
 
+def test_unload_drops_registry_ownership(fresh_registry):
+    """What is provable without CUDA: the registry stops owning the model.
+
+    Scope note — a weakref/GC assertion is deliberately NOT used here. Once
+    ``entry.instance = None`` drops the last reference, CPython frees the object
+    immediately by refcounting, with or without an explicit ``gc.collect()``
+    (verified experimentally). Such a test therefore passes identically whether
+    or not the teardown sweep runs, and would be vacuous.
+
+    What actually determines VRAM reclamation is the CUDA allocator flush
+    (``empty_cache`` / ``ipc_collect``) plus the engine-side nulling of
+    ``self.bundle``. The flush is asserted via the teardown spy; the nulling is
+    asserted statically by ``test_engine_nulls_bundle_before_registry_unload``.
+
+    A real reclamation *measurement* needs torch + CUDA and belongs to Gate M2.
+    """
+    sentinel = object()
+    fresh_registry.register("owned", loader=lambda: sentinel, min_vram_gb=0.0)
+    assert fresh_registry.get("owned") is sentinel
+
+    fresh_registry.unload("owned")
+
+    assert fresh_registry.is_loaded("owned") is False
+    assert fresh_registry.registry_summary()["owned"]["loaded"] is False
+
+
 def test_unload_unknown_model_raises(fresh_registry):
     with pytest.raises(ModelNotFoundError):
         fresh_registry.unload("never_registered")

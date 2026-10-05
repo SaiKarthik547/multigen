@@ -8,7 +8,7 @@ Priority (highest → lowest):
 
 LLM env overrides follow the same pattern, all prefixed MGOS_LLM_:
   MGOS_LLM_ENABLED=true
-  MGOS_LLM_PRmultigenaiDER=api
+  MGOS_LLM_PROVIDER=api
   MGOS_LLM_API_MODE=gemini
   MGOS_LLM_MODEL=gemini-1.5-flash
   MGOS_LLM_ENDPOINT=https://...
