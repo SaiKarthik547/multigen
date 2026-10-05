@@ -9,6 +9,71 @@
 
 ---
 
+## ⚠️ Architecture status — read this first
+
+**The video backend is now [Ovi](https://github.com/character-ai/Ovi)** (joint
+audio-video generation). Everything below the banner describing the video
+pipeline as **SVD-XT / AnimateDiff + RIFE** is **historical** and describes
+retired code paths. It is kept for context, not as current behaviour.
+
+### The pipeline that actually runs today
+
+```
+prompt ──► ScenePlanner ──► SDXL keyframe ──► image engine FULLY released
+                                                    │  (no VRAM overlap)
+                                                    ▼
+                                    Ovi fusion bundle (ONE strict checkpoint)
+                                            │
+              scene 1 ◄────────────────────┘  (I2V: keyframe as first frame)
+                 │
+                 ├─► decoded LAST FRAME ──► scene 2 reference ──► … ──► scene N
+                 │                            (continuation via the image channel)
+                 ▼
+          ffmpeg xfade/acrossfade ──► final movie
+```
+
+Key properties (all enforced in code and covered by tests):
+
+- **Images and video never share VRAM.** The image engine is torn down via
+  `ImageEngine.release()` *before* the Ovi bundle is constructed.
+- **One trained Ovi checkpoint, loaded strictly.** `<ckpt_dir>/Ovi/<basename>`
+  is mandatory; a missing checkpoint is a hard error, never a silent fall back
+  to base Wan/MMAudio weights.
+- **Independent video and audio schedulers**, and `first_frame_is_clean` on
+  both the guided and unguided passes.
+- **Prompt contract**: `<S>spoken dialogue<E>` plus `Audio: sound design`
+  (rewritten to `<AUDCAP>…<ENDAUDCAP>` for the `720x720_5s` checkpoint).
+- **Variant-driven**, never user-guessed: 24 FPS, 121 frames (5 s) / 241 (10 s),
+  latent lengths 31/157 (5 s) and 61/314 (10 s).
+- **Continuation is an image handoff** (previous segment's last decoded frame),
+  not latent poking.
+
+### Configuration
+
+`multigenai/core/config/model_config.yaml`:
+
+```yaml
+ovi_checkpoint_dir: /kaggle/input/mgos-weights   # contains Ovi/, Wan2.2-TI2V-5B/, MMAudio/
+ovi_model_name: 720x720_5s                      # 720x720_5s | 960x960_5s | 960x960_10s
+ovi_cpu_offload: null                           # null = auto (true on Kaggle)
+ovi_fp8: null                                   # null = auto (fp8 checkpoint if present)
+```
+
+### VRAM reality check
+
+Upstream Ovi documents ~32 GB peak for bf16 and ~24 GB for fp8, above a 16 GB
+Kaggle T4/P100. The loader therefore defaults to the **fp8** checkpoint (which
+upstream ships for `720x720_5s` only) plus CPU offload around the sampling
+loop, and enforces a VRAM admission floor **before** touching weights
+(fp8 → 14 GB, bf16 + offload → 24 GB, bf16 → 32 GB) so an under-powered card
+fails fast instead of being OOM-killed mid-run.
+
+**Status:** the wiring, contracts and orchestration are implemented and tested
+offline, but **no real checkpoint inference has been executed yet**. Treat the
+first GPU run as the acceptance gate.
+
+---
+
 ## Table of Contents
 
 1. [What is MultiGenAI OS?](#what-is-multigenai-os)

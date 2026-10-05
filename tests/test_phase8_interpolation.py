@@ -193,18 +193,24 @@ class TestSchemaValidation:
         assert req.interpolation_factor == 1
 
     def test_schema_defaults(self):
-        """Default values: interpolate=True, interpolation_factor=2."""
+        """Ovi-era defaults: RIFE is retired from the cinematic path.
+
+        Ovi emits native 24 FPS output, so interpolation defaults off and the
+        factor stays 1 (opt-in only for legacy backends).
+        """
         from multigenai.llm.schema_validator import VideoGenerationRequest
 
         req = VideoGenerationRequest(prompt="ocean waves at sunrise")
-        assert req.interpolate is True
-        assert req.interpolation_factor == 2
+        assert req.interpolate is False
+        assert req.interpolation_factor == 1
 
     def test_factor_4_accepted(self):
-        """interpolation_factor=4 is at the maximum boundary — must be accepted."""
+        """interpolation_factor=4 at the boundary is accepted when opted in."""
         from multigenai.llm.schema_validator import VideoGenerationRequest
 
-        req = VideoGenerationRequest(prompt="test", interpolation_factor=4)
+        req = VideoGenerationRequest(
+            prompt="test", interpolate=True, interpolation_factor=4
+        )
         assert req.interpolation_factor == 4
 
 

@@ -74,8 +74,11 @@ def test_video_engine_safe_schema_mapping():
     # Verify the unused schema field 'frame_duration' is still present for backwards compat
     assert req.frame_duration >= 0.1
 
-    with pytest.raises(ValueError, match="divisible by 64"):
-        VideoGenerationRequest(prompt="test video", width=258) # not % 64
+    # Ovi-era contract: dimensions must be divisible by 32 (the snap that
+    # upstream's snap_hw_to_multiple_of_32 guarantees), not 64.
+    with pytest.raises(ValueError, match="divisible by 32"):
+        VideoGenerationRequest(prompt="test video", width=258)  # not % 32
+    assert VideoGenerationRequest(prompt="test video").width % 32 == 0
 
 
 # ---------------------------------------------------------------------------

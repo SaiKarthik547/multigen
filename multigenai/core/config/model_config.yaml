@@ -11,3 +11,17 @@ t5_tokenizer_path: /kaggle/input/mgos-weights/Wan2.2-TI2V-5B/google/umt5-xxl
 controlnet_depth: /kaggle/input/mgos-weights/controlnet-depth-sdxl-1.0
 identity_model_path: /kaggle/input/mgos-weights/Identity
 fusion_adapter_path: /kaggle/input/mgos-weights/fusion_adapter
+
+# ---------------------------------------------------------------------------
+# Ovi joint audio-video stack (upstream layout: <ckpt_dir>/Ovi/<basename>)
+# ---------------------------------------------------------------------------
+# ovi_checkpoint_dir: root containing Ovi/, Wan2.2-TI2V-5B/ and MMAudio/.
+#   Falls back to the parent of wan_model_path when omitted.
+ovi_checkpoint_dir: /kaggle/input/mgos-weights
+# 720x720_5s | 960x960_5s | 960x960_10s
+ovi_model_name: 720x720_5s
+# null = auto: true on Kaggle, false elsewhere.
+ovi_cpu_offload: null
+# null = auto: true on Kaggle when model_fp8_e4m3fn.safetensors exists
+# (fp8 ships for 720x720_5s only). bf16 needs >= 24 GB VRAM.
+ovi_fp8: null

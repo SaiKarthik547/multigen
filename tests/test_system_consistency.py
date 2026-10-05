@@ -66,9 +66,14 @@ def test_static_rebranding_audit():
     assert not failures, "Found stale upstream references:\n" + "\n".join(failures)
 
 def test_registry_key_consistency():
-    """Verify Engines use the correct MGOS/Kaggle registry keys."""
+    """Verify Engines use the correct MGOS/Kaggle registry keys.
+
+    ``fusion_adapter_path`` was deliberately removed: the Ovi integration now
+    loads the single upstream fusion checkpoint strictly (see
+    multigenai/ovi/loader.py), which supersedes the non-upstream adapter.
+    """
     engines_dir = pathlib.Path(__file__).parent.parent / "multigenai" / "engines"
-    required_keys = ["wan_model_path", "mmaudio_model_path", "shared_t5_path", "t5_tokenizer_path", "fusion_adapter_path"]
+    required_keys = ["wan_model_path", "mmaudio_model_path", "shared_t5_path", "t5_tokenizer_path"]
     
     engine_files = list(engines_dir.rglob("engine.py"))
     

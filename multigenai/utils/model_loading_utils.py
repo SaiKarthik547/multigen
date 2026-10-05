@@ -87,6 +87,14 @@ def init_text_model(ckpt_dir, rank):
 
 
 def load_fusion_checkpoint(model, checkpoint_path, from_meta=False):
+    """Load the Ovi fusion checkpoint STRICTLY (upstream contract).
+
+    strict=True is load-bearing: FusionModel adds cross-modal fusion
+    projections (k_fusion / v_fusion / pre_attn_norm_fusion / norm_k_fusion)
+    that exist ONLY in a trained Ovi checkpoint. Silently skipping missing
+    keys (strict=False) would run a model whose fusion path was randomly
+    initialised — a wrong-video/wrong-audio result with no error.
+    """
     if checkpoint_path and os.path.exists(checkpoint_path):
         if checkpoint_path.endswith(".safetensors"): 
             df = load_file(checkpoint_path, device="cpu")
@@ -94,7 +102,7 @@ def load_fusion_checkpoint(model, checkpoint_path, from_meta=False):
             try:
                 df = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
                 df = df['module'] if 'module' in df else df
-            except Exception as e:
+            except Exception:
                 df = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
                 df = df['app']['model']
         else: 
@@ -107,4 +115,4 @@ def load_fusion_checkpoint(model, checkpoint_path, from_meta=False):
         gc.collect()
         print(f"Successfully loaded fusion checkpoint from {checkpoint_path}")
     else: 
-        raise RuntimeError("{checkpoint=} does not exists'")
+        raise RuntimeError(f"{checkpoint_path=} does not exist")

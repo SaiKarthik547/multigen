@@ -1,28 +1,50 @@
 """
 MGOS Joint Fusion Engine — Synchronized Cinematic Video & Audio Generation.
 
-Features:
-- Joint Diffusion: High-fidelity Video and Audio latents predicted in a single DiT pass.
-- Backbone: Wan 2.2 Transformer.
-- Audio: MMAudio (BigVGAN Vocoding).
-- Identity: MGOS IdentityResolver (512-d ArcFace).
-- Optimization: Kaggle T4/P100 (Flow Selection, Guidance Scaling, SLG).
+Upstream-aligned Ovi inference contract:
+
+- ONE trained fusion checkpoint (``<ckpt_dir>/Ovi/<basename>``) loaded
+  STRICTLY via :mod:`multigenai.ovi.loader` — never separate Wan/MMAudio
+  weights, never a non-upstream "adapter".
+- Variant drives the temporal contract: 31/157 video/audio latent frames for
+  the 5s checkpoints, 61/314 for 10s (shipped with the upstream checkpoints).
+- I2V conditioning = first-frame latent + ``first_frame_is_clean=True`` on
+  BOTH guided and unguided passes (the Wan time-embedding is zeroed on the
+  first frame's patches). Identity is NOT injected as ``clip_fea`` —
+  ``FusionModel.forward`` hard-asserts ``clip_fea is None``, and ArcFace is a
+  recognition embedding, not an Ovi conditioning vector.
+- Separate video and audio schedulers (multistep solvers carry per-modality
+  history; sharing one instance corrupts it).
+- Prompt contract: ``<S>dialogue<E>`` + ``Audio: description`` (with the
+  per-variant ``<AUDCAP>`` rewrite) — see :mod:`multigenai.ovi.prompt`.
+- Output is native 24 FPS per the variant; frame counts come from the decoded
+  tensor, never from a hardcoded 81.
 """
 
 from __future__ import annotations
 
-import gc
+import dataclasses
 import pathlib
-import json
-import torch
-import numpy as np
+import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
+
+import numpy as np
+import torch
 from tqdm import tqdm
 
 from multigenai.core.logging.logger import get_logger
 from multigenai.core.model_registry import ModelRegistry
-from multigenai.utils.processing_utils import preprocess_image_tensor, snap_hw_to_multiple_of_32
+from multigenai.ovi.contracts import (
+    ObservedShape,
+    OviModelSpec,
+    derive_seq_len,
+)
+from multigenai.ovi.prompt import build_ovi_prompt
+from multigenai.utils.processing_utils import (
+    preprocess_image_tensor,
+    snap_hw_to_multiple_of_32,
+)
 
 if TYPE_CHECKING:
     from multigenai.core.execution_context import ExecutionContext
@@ -30,30 +52,27 @@ if TYPE_CHECKING:
 
 LOG = get_logger(__name__)
 
-# P0-N: package-relative DiT config directory. Replaces the previous
-# CWD-relative `pathlib.Path("multigenai/configs/model/dit")`, which only
-# resolved when the process happened to start from the repo root.
-_DIT_CONFIG_DIR = pathlib.Path(__file__).resolve().parents[2] / "configs" / "model" / "dit"
-
 
 @dataclass
 class FusionResult:
     """Joint Video and Audio Output."""
+
     video_path: str
     audio_path: str
-    latents: torch.Tensor # For temporal handover
+    latents: torch.Tensor          # last-frame latent (kept for diagnostics)
     frame_count: int
     fps: int
     seed: int
     success: bool = True
     error: Optional[str] = None
+    #: Decoded last frame saved as PNG — the I2V continuation reference for
+    #: the next scene (image handoff, not latent poking).
+    last_frame_path: Optional[str] = None
+    duration_seconds: float = 0.0
 
 
 class FusionEngine:
-    """
-    Kaggle-grade Joint Fusion Engine.
-    Implements the deep MGOS pipeline logic within the MGOS framework.
-    """
+    """Joint Ovi cinematography engine (upstream-contract inference)."""
 
     def __init__(self, ctx: "ExecutionContext") -> None:
         self._ctx = ctx
@@ -61,345 +80,444 @@ class FusionEngine:
         self._out_dir.mkdir(parents=True, exist_ok=True)
         self.device = ctx.device
         self.registry = ModelRegistry.instance()
-        
-        # Paths from model_config.yaml
-        self.wan_path = self.registry.get_config_value("wan_model_path")
-        self.mmaudio_path = self.registry.get_config_value("mmaudio_model_path")
-        self.t5_path = self.registry.get_config_value("shared_t5_path")
-        self.t5_tokenizer_path = self.registry.get_config_value("t5_tokenizer_path")
-        self.fusion_adapter_path = self.registry.get_config_value("fusion_adapter_path")
+        self.bundle = None
+        self._spec: Optional[OviModelSpec] = None
+        # When the orchestrator runs several scenes back-to-back it sets this
+        # flag so the (expensive) checkpoint stays resident between scenes;
+        # the orchestrator then calls release() explicitly after the phase.
+        self._hold_bundle = False
 
-    def _load_bundle(self, is_i2v: bool = False) -> None:
-        """Lazily loads all cinematic components into a Joint Bundle."""
-        model_id = "mgos_fusion_bundle"
-        
-        def loader():
-            from multigenai.models.wan.model import WanModel
-            from multigenai.models.wan.vae2_2 import Wan2_2_VAE
-            from multigenai.models.mmaudio.mmaudio_core.features_utils import FeaturesUtils
-            from multigenai.models.shared.t5 import T5EncoderModel
-            from safetensors.torch import load_file
+    def hold_bundle(self) -> None:
+        """Keep the loaded bundle across consecutive run() calls."""
+        self._hold_bundle = True
 
-            # 1. Joint Transformer Backbone (Wan 2.2)
-            # P0-N: package-relative config paths — never CWD-relative.
-            cfg_path = _DIT_CONFIG_DIR / "video.json"
-            with open(cfg_path) as f:
-                config = json.load(f)
+    # ------------------------------------------------------------------
+    # Loading (delegates to the single authoritative Ovi loader)
+    # ------------------------------------------------------------------
 
-            # audio backbone
-            a_cfg_path = _DIT_CONFIG_DIR / "audio.json"
-            with open(a_cfg_path) as f:
-                a_config = json.load(f)
+    def _load_bundle(self) -> OviModelSpec:
+        from multigenai.ovi.loader import OVI_BUNDLE_ID, register_ovi_bundle
 
-            # P0-B: identity is NOT injected via additional_emb_*.
-            #
-            # wan/model.py maps model_type 'ti2v' -> 't2v_cross_attn', which asserts
-            #     additional_emb_dim is None and additional_emb_length is None
-            # (see wan/model.py cross_attn_type resolution + assert).
-            # Injecting 512/257 therefore made construction of every I2V bundle fail
-            # with:
-            #     AssertionError: additional_emb_length should be None for t2v and t2a model
-            #
-            # I2V conditioning is delivered as an image latent occupying the first
-            # temporal slot (first_frame_is_clean=True) instead. ArcFace embeddings
-            # are used for candidate selection / quality control, never as a
-            # transformer cross-attention embedding.
-            for key in ("additional_emb_dim", "additional_emb_length"):
-                config.pop(key, None)
-
-            from multigenai.models.fusion.fusion import FusionModel
-            model = FusionModel(video_config=config, audio_config=a_config).to(self.device).to(torch.bfloat16).eval()
-            
-            # Load weights for both (they might be in separate safetensors or shared)
-            # Derived from the upstream reference loader: weights load into the video and audio sub-models.
-            model.video_model.load_state_dict(load_file(pathlib.Path(self.wan_path) / "model.safetensors", device="cpu"), strict=False)
-            model.audio_model.load_state_dict(load_file(pathlib.Path(self.mmaudio_path) / "model.safetensors", device="cpu"), strict=False)
-            
-            model.set_rope_params()
-
-            # 2. Dual VAEs
-            v_vae = Wan2_2_VAE(vae_pth=str(pathlib.Path(self.wan_path) / "Wan2.2_VAE.pth"), device=self.device)
-            a_vae = FeaturesUtils(mode='16k', need_vae_encoder=True, 
-                                 tod_vae_ckpt=str(pathlib.Path(self.mmaudio_path) / "ext_weights/v1-16.pth"),
-                                 bigvgan_vocoder_ckpt=str(pathlib.Path(self.mmaudio_path) / "ext_weights/best_netG.pt")).to(self.device)
-
-            # 3. Text Encoder
-            t5 = T5EncoderModel(text_len=512, dtype=torch.bfloat16, device=self.device,
-                                checkpoint_path=self.t5_path, tokenizer_path=self.t5_tokenizer_path)
-
-            # 4. MGOS Core Fusion Weights Sync
-            # This loads the cross-attention KV projections injected during FusionModel init.
-            if self.fusion_adapter_path and pathlib.Path(self.fusion_adapter_path).exists():
-                LOG.info(f"FusionEngine: Loading MGOS Fusion Adapter from {self.fusion_adapter_path}")
-                adapter_path = pathlib.Path(self.fusion_adapter_path) / "model.safetensors"
-                if adapter_path.exists():
-                    model.load_state_dict(load_file(adapter_path, device="cpu"), strict=False)
-                else:
-                    LOG.warning("FusionEngine: Fusion adapter weights not found at expected path. Using default initialization.")
-
-            return {"model": model, "v_vae": v_vae, "a_vae": a_vae, "t5": t5}
-
-        if not self.registry.is_loaded(model_id):
-            self.registry.register(model_id, loader=loader, min_vram_gb=15.0)
-        
-        self.bundle = self.registry.get(model_id, environment=self._ctx.environment)
-
-    def _resolve_latent_dims(self, video_cfg, audio_cfg, vl_h, vl_w, latents_images, request) -> None:
-        """Resolve the latent temporal length and transformer sequence lengths.
-
-        Contract (Gate M2/M3 — see docs/ROADMAP_REVIEW.md):
-        the latent temporal length is NOT the frame count. The Wan VAE applies
-        ``temperal_downsample=[False, True, True]`` (4x temporal compression),
-        so it has not been measured on real weights yet.
-
-        Therefore, in priority order:
-          1. If an I2V image latent was produced, its temporal length is
-             authoritative — it came out of the real VAE.
-          2. Otherwise the resolved OviModelSpec's measured shape is used.
-          3. Otherwise we fall back to the frame count *and log a loud warning*,
-             because that fallback is the exact assumption that caused the
-             original bug. It is not silently trusted downstream.
-
-        Sets ``self._v_latent_f``, ``self._a_latent_len``,
-        ``self._v_seq_len`` and ``self._a_seq_len``.
-        """
-        from multigenai.ovi.contracts import (
-            OviModelSpec,
-            UnobservedContractError,
-            derive_seq_len,
+        if not self.registry.is_loaded(OVI_BUNDLE_ID):
+            self._spec = register_ovi_bundle(self.registry, self._ctx.environment)
+        self.bundle = self.registry.get(
+            OVI_BUNDLE_ID, environment=self._ctx.environment
         )
+        self._spec = self.bundle.spec
+        return self._spec
 
-        video_patch = tuple(video_cfg["patch_size"])
-        audio_patch = tuple(audio_cfg["patch_size"])
+    # ------------------------------------------------------------------
+    # Latent geometry — measured/contract-driven, never frame-count fallback
+    # ------------------------------------------------------------------
 
-        # --- 1. Measured-from-VAE I2V latent ---
-        if latents_images is not None:
-            latent_f = int(latents_images.shape[1])
-            source = "i2v image latent (measured via Wan2_2_VAE.wrapped_encode)"
-        else:
-            # --- 2. Spec-observed, else 3. flagged fallback ---
-            spec = getattr(self, "_ovi_spec", None)
-            observed = getattr(spec, "observed_video", None) if spec else None
-            if observed is not None and observed.is_provenance_backed:
-                latent_f = int(observed.latent_shape[0])
-                source = f"spec '{spec.name}' observed video latent"
-            else:
-                latent_f = int(getattr(request, "num_frames", 81) or 81)
-                source = None
-                LOG.warning(
-                    "FusionEngine: NO MEASURED video latent length available. "
-                    f"Falling back to num_frames={latent_f}. The Wan VAE applies "
-                    "4x temporal compression, so this is very likely WRONG. "
-                    "Run Gate M2 (encode a real clip through Wan2_2_VAE and record "
-                    "configs/observed/<variant>.observed.json) before trusting output."
-                )
+    def _resolve_latent_dims(self, vl_h: int, vl_w: int) -> Tuple[int, int]:
+        """Resolve transformer sequence lengths from the variant contract.
 
-        self._v_latent_f = latent_f
-        self._v_seq_len = derive_seq_len((latent_f, vl_h, vl_w), video_patch)
+        The temporal latent lengths come from the upstream checkpoint contract
+        (attached by the loader with provenance); the spatial latent size comes
+        from the measured I2V image latent or from variant-snapped geometry for
+        T2V.  There is deliberately NO frame-count fallback: if the contract is
+        incomplete we refuse to generate rather than guess.
 
-        # Audio latent length has no I2V analogue; it must come from the spec.
-        spec = getattr(self, "_ovi_spec", None)
-        a_observed = getattr(spec, "observed_audio", None) if spec else None
-        if a_observed is not None and a_observed.is_provenance_backed:
-            self._a_latent_len = int(a_observed.latent_shape[0])
-        else:
-            self._a_latent_len = int(getattr(spec, "audio_latent_length", None) or 157)
-            LOG.warning(
-                "FusionEngine: NO MEASURED audio latent length available; using "
-                f"{self._a_latent_len}. Run Gate M3 to record the real value."
-            )
+        Sets ``self._v_latent_f``, ``self._a_latent_len``, ``self._v_seq_len``,
+        ``self._a_seq_len`` and returns ``(video_seq_len, audio_seq_len)``.
+        """
+        assert self._spec is not None, "bundle must be loaded before geometry"
+        self._spec.assert_ready()
+
+        self._v_latent_f = int(self._spec.video_latent_length)
+        self._v_seq_len = derive_seq_len(
+            (self._v_latent_f, vl_h, vl_w), tuple(self._spec.video_patch)
+        )
+        self._a_latent_len = int(self._spec.audio_latent_length)
         self._a_seq_len = derive_seq_len(
-            (self._a_latent_len, 1, 1), audio_patch
+            (self._a_latent_len, 1, 1), tuple(self._spec.audio_patch)
         )
 
         LOG.info(
-            f"FusionEngine latent dims: video=({latent_f}, {vl_h}, {vl_w}) "
-            f"-> vid_seq_len={self._v_seq_len} [{source}]; "
-            f"audio_len={self._a_latent_len} -> audio_seq_len={self._a_seq_len}"
+            "FusionEngine latent dims: video=(%d, %d, %d) -> vid_seq_len=%d; "
+            "audio_len=%d -> audio_seq_len=%d [provenance: %s]",
+            self._v_latent_f, vl_h, vl_w, self._v_seq_len,
+            self._a_latent_len, self._a_seq_len, self._spec.latent_provenance,
         )
+        return self._v_seq_len, self._a_seq_len
+
+    # ------------------------------------------------------------------
+    # Teardown
+    # ------------------------------------------------------------------
 
     def _unload(self) -> None:
         """Release the Ovi bundle and return VRAM to the allocator.
 
-        P0-C ownership contract: nulling the registry reference is not enough.
-        The engine also holds the bundle in `self.bundle`, so that reference is
-        dropped explicitly BEFORE the registry teardown runs the gc/CUDA sweep —
-        otherwise the models stay reachable and VRAM is never freed.
+        Ownership contract: null the engine's reference BEFORE the registry
+        teardown runs the gc/CUDA sweep — otherwise the models stay reachable
+        and VRAM is never freed.
         """
         from multigenai.core.model_lifecycle import ModelLifecycle
 
         self.bundle = None
-        self.registry.unload("mgos_fusion_bundle")
+        self.registry.unload("ovi_fusion_bundle")
         ModelLifecycle.enforce_cleanup("FusionEngine._unload")
 
-    def run(self, request: "VideoGenerationRequest", image_path: Optional[str] = None, 
-            temporal_state: Optional["TemporalState"] = None, 
-            dialogue: Optional[str] = None) -> FusionResult:
-        """Joint MGOS Cinematography Synthesis."""
-        try:
-            is_i2v = image_path is not None
-            self._load_bundle(is_i2v=is_i2v)
-            
-            model = self.bundle["model"]
-            v_vae = self.bundle["v_vae"]
-            a_vae = self.bundle["a_vae"]
-            t5 = self.bundle["t5"]
-            
-            seed = request.seed or int(torch.randint(0, 1000000, (1,)).item())
-            torch.manual_seed(seed)
-            torch.cuda.manual_seed(seed)
+    def release(self) -> None:
+        """Public teardown used by the orchestrator between engine phases."""
+        if self.registry.is_loaded("ovi_fusion_bundle"):
+            self._unload()
+        else:
+            self.bundle = None
 
-            # 1. Conditioning Inputs
-            audio_text = dialogue if dialogue else request.prompt
-            text_embs = t5([request.prompt, request.negative_prompt, audio_text], self.device)
-            v_pos_emb, v_neg_emb, a_pos_emb = text_embs[0], text_embs[1], text_embs[2]
-            
-            # Use a default negative prompt for audio
-            a_neg_emb = t5(["low quality, noise, distortion"], self.device)[0]
-            
-            # Identity Injection
-            id_emb = None
-            if is_i2v and request.character_id:
-                from multigenai.identity.identity_resolver import IdentityResolver
-                id_emb = torch.tensor(IdentityResolver().resolve(request.character_id).face_embedding, 
-                                     device=self.device, dtype=torch.bfloat16).unsqueeze(0)
+    # ------------------------------------------------------------------
+    # Generation
+    # ------------------------------------------------------------------
 
-            # 2. Resolution Snapping
-            vh, vw = snap_hw_to_multiple_of_32(request.height, request.width, area=720*720)
-            vl_h, vl_w = vh // 16, vw // 16
-            
-            # Preprocess first frame if I2V
-            latents_images = None
-            if is_i2v:
-                from multigenai.utils.processing_utils import preprocess_image_tensor
-                first_frame = preprocess_image_tensor(image_path, self.device, torch.bfloat16)
-                with torch.no_grad():
-                    latents_images = v_vae.wrapped_encode(first_frame[:, :, None]).to(torch.bfloat16).squeeze(0)
-                vl_h, vl_w = latents_images.shape[2], latents_images.shape[3]
+    def run(
+        self,
+        request: "VideoGenerationRequest",
+        image_path: Optional[str] = None,
+        dialogue: Optional[str] = None,
+        audio_description: Optional[str] = None,
+        temporal_state: Optional[object] = None,
+    ) -> FusionResult:
+        """Joint Ovi synthesis for one scene.
 
-            # 3. Joint Noise Distribution
-            #
-            # Channel counts come from the DiT configs — they were previously
-            # hardcoded as 16 (video) and 12 (audio), which contradicted
-            # in_dim=48 / in_dim=20 and would have failed the Conv3d patch
-            # embedding on channel count alone.
-            from multigenai.ovi.contracts import load_dit_config
-
-            video_cfg = load_dit_config("video")
-            audio_cfg = load_dit_config("audio")
-            video_in_dim = int(video_cfg["in_dim"])
-            audio_in_dim = int(audio_cfg["in_dim"])
-
-            # Temporal/ssequence lengths must come from the resolved model spec,
-            # which holds shapes *measured* through the VAE. Until Gate M2/M3
-            # have run on real weights there is no measured shape, so we refuse
-            # to guess and derive from the I2V latent when one is available.
-            self._resolve_latent_dims(
-                video_cfg, audio_cfg, vl_h, vl_w, latents_images, request
+        Continuity between scenes is handled by the orchestrator through the
+        image channel (previous segment's last frame becomes this segment's
+        I2V reference). ``temporal_state`` is accepted for API compatibility
+        but is intentionally unused: poking a latent into the first temporal
+        slot without ``first_frame_is_clean`` corrupts the time embedding.
+        """
+        if temporal_state is not None:
+            LOG.debug(
+                "FusionEngine: temporal_state ignored — continuation uses the "
+                "last-frame image handoff (upstream I2V mechanism)."
             )
+        try:
+            spec = self._load_bundle()
+            bundle = self.bundle
+
+            model = bundle.model
+            v_vae = bundle.v_vae
+            a_vae = bundle.a_vae
+            t5 = bundle.t5
+
+            seed = request.seed if request.seed is not None else int(
+                torch.randint(0, 1_000_000, (1,)).item()
+            )
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed(seed)
+
+            is_i2v = image_path is not None
+            target_area = spec.target_width * spec.target_height
+
+            # 1. Prompt contract (<S>speech<E> / Audio: / <AUDCAP>)
+            ovi_prompt = build_ovi_prompt(
+                scene_description=request.prompt,
+                dialogue=dialogue,
+                audio_description=audio_description,
+                video_negative_prompt=getattr(
+                    request, "video_negative_prompt", ""
+                ) or None,
+                audio_negative_prompt=getattr(
+                    request, "audio_negative_prompt", ""
+                ) or None,
+                audio_tag_style=spec.audio_tag_style,
+            )
+            final_prompt = ovi_prompt.render()
+            if ovi_prompt.speech or ovi_prompt.audio_description:
+                LOG.info("FusionEngine prompt: %s", final_prompt)
+
+            # 2. Text encodings (upstream: prompt -> joint video+audio pos,
+            #    then separate video/audio negatives).
+            bundle.t5_to_device()
+            text_embeddings = t5(
+                [
+                    final_prompt,
+                    ovi_prompt.video_negative_prompt,
+                    ovi_prompt.audio_negative_prompt,
+                ],
+                t5.device,
+            )
+            text_embeddings = [
+                emb.to(torch.bfloat16).to(self.device) for emb in text_embeddings
+            ]
+            emb_joint_pos = text_embeddings[0]
+            emb_video_neg = text_embeddings[1]
+            emb_audio_neg = text_embeddings[2]
+            bundle.t5_offload()
+
+            # 3. Spatial latent geometry
+            if is_i2v:
+                bundle.vae_video_to_device()
+                with torch.no_grad():
+                    first_frame = preprocess_image_tensor(
+                        image_path, self.device, torch.bfloat16,
+                        resize_total_area=target_area,
+                    )
+                    latents_images = v_vae.wrapped_encode(
+                        first_frame[:, :, None]
+                    ).to(torch.bfloat16).squeeze(0)
+                bundle.vae_video_offload()
+                vl_h, vl_w = int(latents_images.shape[2]), int(latents_images.shape[3])
+                spatial_source = "i2v image latent (measured via Wan2_2_VAE)"
+            else:
+                vh, vw = snap_hw_to_multiple_of_32(
+                    request.height, request.width, area=target_area
+                )
+                vl_h, vl_w = vh // 16, vw // 16
+                latents_images = None
+                spatial_source = "t2v area-snapped geometry"
+
+            # Observed video shape: upstream temporal length + measured/snapped
+            # spatial dims, provenance recorded for the readiness gate.
+            spec = dataclasses.replace(
+                spec,
+                observed_video=ObservedShape(
+                    latent_shape=(int(spec.video_latent_length), vl_h, vl_w),
+                    dtype="bfloat16",
+                    channels=int(spec.video_in_dim),
+                    source=f"{spatial_source}; temporal from {spec.latent_provenance}",
+                ),
+            )
+            self._spec = spec
+            self._resolve_latent_dims(vl_h, vl_w)
+
+            # 4. Joint noise (channels from the DiT configs via the spec;
+            #    temporal lengths from the upstream checkpoint contract).
+            video_in_dim = int(spec.video_in_dim)
+            audio_in_dim = int(spec.audio_in_dim)
+            device = self.device if torch.cuda.is_available() else "cpu"
 
             v_noise = torch.randn(
                 (video_in_dim, self._v_latent_f, vl_h, vl_w),
-                device=self.device, dtype=torch.bfloat16,
+                device=device, dtype=torch.bfloat16,
+                generator=torch.Generator(device=device).manual_seed(seed),
             )
             a_noise = torch.randn(
                 (self._a_latent_len, audio_in_dim),
-                device=self.device, dtype=torch.bfloat16,
+                device=device, dtype=torch.bfloat16,
+                generator=torch.Generator(device=device).manual_seed(seed),
             )
-            
-            if temporal_state and temporal_state.global_latent is not None:
-                v_noise[:, :1] = temporal_state.global_latent.to(self.device).to(torch.bfloat16)
 
-            # 4. Sampling Loop (MGOS-Optimized Logic)
-            solver_name = getattr(request, "solver", "unipc")
-            shift = getattr(request, "shift", 5.0)
-            scheduler, timesteps = self.get_scheduler_time_steps(
-                sampling_steps=request.sampling_steps or 30,
-                solver_name=solver_name,
-                device=self.device,
-                shift=shift
+            # 5. Sampling configuration (upstream defaults, variant-driven)
+            solver_name = getattr(request, "solver", "unipc") or "unipc"
+            shift = float(getattr(request, "shift", 5.0) or 5.0)
+            sample_steps = int(
+                getattr(request, "sample_steps", None)
+                or getattr(request, "sampling_steps", None)
+                or spec.sample_steps
             )
-            
-            with torch.inference_mode(), torch.amp.autocast('cuda', enabled=True, dtype=torch.bfloat16):
-                current_v = v_noise
-                current_a = a_noise
-                
-                for i, t in enumerate(tqdm(timesteps, desc=f"MGOS Fusion ({solver_name})")):
+            video_gs = float(
+                getattr(request, "video_guidance_scale", None)
+                or spec.video_guidance_scale
+            )
+            audio_gs = float(
+                getattr(request, "audio_guidance_scale", None)
+                or spec.audio_guidance_scale
+            )
+            slg_layer = int(
+                getattr(request, "slg_layer", None)
+                if getattr(request, "slg_layer", None) is not None
+                else spec.slg_layer
+            )
+
+            # Upstream: independent schedulers per modality — multistep
+            # solvers carry state, so sharing one instance corrupts history.
+            scheduler_video, timesteps_video = self.get_scheduler_time_steps(
+                sampling_steps=sample_steps, solver_name=solver_name,
+                device=device, shift=shift,
+            )
+            scheduler_audio, timesteps_audio = self.get_scheduler_time_steps(
+                sampling_steps=sample_steps, solver_name=solver_name,
+                device=device, shift=shift,
+            )
+
+            # 6. Sampling loop
+            bundle.model_to_device()
+            with torch.inference_mode(), torch.amp.autocast(
+                "cuda", enabled=torch.cuda.is_available(), dtype=torch.bfloat16
+            ):
+                for i, (t_v, t_a) in enumerate(
+                    tqdm(
+                        list(zip(timesteps_video, timesteps_audio)),
+                        desc=f"Ovi fusion ({solver_name}, {sample_steps} steps)",
+                    )
+                ):
+                    timestep_input = torch.full((1,), t_v, device=device)
+
                     if is_i2v:
-                        current_v[:, :1] = latents_images
-                        
-                    t_input = torch.full((1,), t, device=self.device)
-                    
-                    # A. Classifier-Free Guidance forward passes
-                    p_v, p_a = model(vid=[current_v], audio=[current_a], t=t_input, 
-                                     vid_context=[v_pos_emb], audio_context=[a_pos_emb],
-                                     vid_seq_len=self._v_seq_len, audio_seq_len=self._a_seq_len,
-                                     clip_fea=id_emb if is_i2v else None)
-                    # Neg
-                    n_v, n_a = model(vid=[current_v], audio=[current_a], t=t_input,
-                                     vid_context=[v_neg_emb], audio_context=[a_neg_emb],
-                                     vid_seq_len=self._v_seq_len, audio_seq_len=self._a_seq_len,
-                                     slg_layer=9)
-                    
-                    # B. Guidance Merging (MGOS Standard Scales)
-                    v_gs = request.guidance_scale or 5.0
-                    a_gs = 4.0
-                    v_drift = n_v[0] + v_gs * (p_v[0] - n_v[0])
-                    a_drift = n_a[0] + a_gs * (p_a[0] - n_a[0])
-                    
-                    # C. Unified Scheduler Step
-                    current_v = scheduler.step(v_drift.unsqueeze(0), t, current_v.unsqueeze(0), return_dict=False)[0].squeeze(0)
-                    current_a = scheduler.step(a_drift.unsqueeze(0), t, current_a.unsqueeze(0), return_dict=False)[0].squeeze(0)
+                        v_noise[:, :1] = latents_images
 
-            # 5. Global Decode
-            if is_i2v:
-                current_v[:, :1] = latents_images
+                    # Positive (conditional) pass
+                    pred_vid_pos, pred_audio_pos = model(
+                        vid=[v_noise],
+                        audio=[a_noise],
+                        t=timestep_input,
+                        vid_context=[emb_joint_pos],
+                        audio_context=[emb_joint_pos],
+                        vid_seq_len=self._v_seq_len,
+                        audio_seq_len=self._a_seq_len,
+                        first_frame_is_clean=is_i2v,
+                    )
+                    # Negative (unconditional) pass — SLG on this branch only.
+                    pred_vid_neg, pred_audio_neg = model(
+                        vid=[v_noise],
+                        audio=[a_noise],
+                        t=timestep_input,
+                        vid_context=[emb_video_neg],
+                        audio_context=[emb_audio_neg],
+                        vid_seq_len=self._v_seq_len,
+                        audio_seq_len=self._a_seq_len,
+                        first_frame_is_clean=is_i2v,
+                        slg_layer=slg_layer,
+                    )
 
-            # Video (Wan VAE)
-            v_res = v_vae.wrapped_decode(current_v.unsqueeze(0))
-            # Audio (MMAudio VAE)
-            a_res = a_vae.wrapped_decode(current_a.unsqueeze(0).transpose(1, 2))
-            
-            v_res_np = v_res.squeeze(0).cpu().float().numpy()
-            a_res_np = a_res.squeeze().cpu().float().numpy()
-            
-            # 6. Final Save
-            from multigenai.engines.video_engine.ffmpeg_utils import encode_video
+                    # Classifier-free guidance per modality
+                    pred_video_guided = pred_vid_neg[0] + video_gs * (
+                        pred_vid_pos[0] - pred_vid_neg[0]
+                    )
+                    pred_audio_guided = pred_audio_neg[0] + audio_gs * (
+                        pred_audio_pos[0] - pred_audio_neg[0]
+                    )
+
+                    # Independent scheduler steps
+                    v_noise = scheduler_video.step(
+                        pred_video_guided.unsqueeze(0), t_v,
+                        v_noise.unsqueeze(0), return_dict=False,
+                    )[0].squeeze(0)
+                    a_noise = scheduler_audio.step(
+                        pred_audio_guided.unsqueeze(0), t_a,
+                        a_noise.unsqueeze(0), return_dict=False,
+                    )[0].squeeze(0)
+            bundle.model_offload()
+
+            # 7-8. Re-condition the first frame before decode (upstream does
+            #      this unconditionally after the loop for I2V), then decode.
+            #      NOTE: v_noise was produced INSIDE inference_mode by the
+            #      scheduler step, so mutating it here requires the same mode —
+            #      upstream gets this by decorating generate() wholesale.
+            with torch.inference_mode():
+                if is_i2v:
+                    v_noise[:, :1] = latents_images
+
+                # Decode (audio first, matching upstream ordering)
+                bundle.vae_audio_to_device()
+                audio_latents = a_noise.unsqueeze(0).transpose(1, 2)
+                generated_audio = a_vae.wrapped_decode(audio_latents)
+                generated_audio = generated_audio.squeeze().cpu().float().numpy()
+                bundle.vae_audio_offload()
+
+                bundle.vae_video_to_device()
+                generated_video = v_vae.wrapped_decode(v_noise.unsqueeze(0))
+                generated_video = generated_video.squeeze(0).cpu().float().numpy()
+                bundle.vae_video_offload()
+
+                # Copy the tail latent OUT of inference mode so callers get a
+                # normal tensor they can freely mutate.
+                with torch.inference_mode(False):
+                    last_latent = v_noise[:, -1:].clone()
+
+            frame_count = int(generated_video.shape[1])
+            fps = int(spec.fps)
+
+            # 9. Persist outputs. The tag includes a uuid because the same seed
+            #    is legitimately reused across scenes (e.g. seed=42) — without
+            #    it every scene would overwrite the previous segment's files.
             import scipy.io.wavfile as wavfile
-            
-            v_path = self._out_dir / f"vid_{seed}.mp4"
-            a_path = self._out_dir / f"aud_{seed}.wav"
-            
-            wavfile.write(str(a_path), 16000, (a_res_np * 32767).astype(np.int16))
-            v_result = encode_video(v_res_np, v_path, request.fps, seed)
-            
-            return FusionResult(v_result.path, str(a_path), current_v[:, -1:], 81, request.fps, seed)
+            from multigenai.engines.video_engine.ffmpeg_utils import encode_video
+
+            tag = f"{seed}_{uuid.uuid4().hex[:8]}"
+            v_path = self._out_dir / f"vid_{tag}.mp4"
+            a_path = self._out_dir / f"aud_{tag}.wav"
+            wavfile.write(
+                str(a_path), 16000,
+                (np.clip(generated_audio, -1.0, 1.0) * 32767).astype(np.int16),
+            )
+            v_result = encode_video(
+                list(generated_video.transpose(1, 2, 3, 0)), v_path, fps, seed
+            )
+            if not v_result.success:
+                return FusionResult("", str(a_path), last_latent, 0, fps, seed,
+                                    False, v_result.error)
+
+            # 10. Last-frame extraction — the continuation reference for the
+            #     next scene (image handoff, not latent poking).
+            #     generated_video is (c, f, h, w) float in [-1, 1].
+            last_frame_path: Optional[str] = None
+            try:
+                from PIL import Image
+
+                last = generated_video[:, -1]                     # (c, h, w)
+                arr = np.clip((last.transpose(1, 2, 0) + 1.0) * 127.5, 0, 255)
+                lf_path = self._out_dir / f"last_frame_{tag}.png"
+                Image.fromarray(arr.astype(np.uint8)).save(str(lf_path))
+                last_frame_path = str(lf_path)
+            except Exception as exc:  # non-fatal: video is already saved
+                LOG.warning("FusionEngine: last-frame extraction failed: %s", exc)
+
+            LOG.info(
+                "FusionEngine done: %d frames @ %d fps (%.2fs) seed=%d",
+                frame_count, fps, frame_count / fps if fps else 0.0, seed,
+            )
+            return FusionResult(
+                video_path=v_result.path,
+                audio_path=str(a_path),
+                latents=last_latent,
+                frame_count=frame_count,
+                fps=fps,
+                seed=seed,
+                success=True,
+                last_frame_path=last_frame_path,
+                duration_seconds=frame_count / fps if fps else 0.0,
+            )
 
         except Exception as e:
             import traceback
-            LOG.error(f"FusionEngine Error: {e}\n{traceback.format_exc()}")
+
+            LOG.error(
+                "FusionEngine Error: %s\n%s", e, traceback.format_exc()
+            )
             return FusionResult("", "", torch.zeros(1), 0, 0, 0, False, str(e))
         finally:
-            if self._ctx.behaviour.auto_unload_after_gen:
+            if (
+                not self._hold_bundle
+                and self._ctx.behaviour.auto_unload_after_gen
+            ):
                 self._unload()
 
-    def get_scheduler_time_steps(self, sampling_steps, solver_name='unipc', device=0, shift=5.0):
+    # ------------------------------------------------------------------
+    # Solvers (unchanged — upstream-identical construction)
+    # ------------------------------------------------------------------
+
+    def get_scheduler_time_steps(self, sampling_steps, solver_name="unipc", device=0, shift=5.0):
         from multigenai.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
-        from multigenai.utils.fm_solvers import FlowDPMSolverMultistepScheduler, get_sampling_sigmas, retrieve_timesteps
+        from multigenai.utils.fm_solvers import (
+            FlowDPMSolverMultistepScheduler,
+            get_sampling_sigmas,
+            retrieve_timesteps,
+        )
         from diffusers import FlowMatchEulerDiscreteScheduler
 
-        if solver_name == 'unipc':
-            sample_scheduler = FlowUniPCMultistepScheduler(num_train_timesteps=1000, shift=1, use_dynamic_shifting=False)
+        if solver_name == "unipc":
+            sample_scheduler = FlowUniPCMultistepScheduler(
+                num_train_timesteps=1000, shift=1, use_dynamic_shifting=False
+            )
             sample_scheduler.set_timesteps(sampling_steps, device=device, shift=shift)
             timesteps = sample_scheduler.timesteps
-        elif solver_name == 'dpm++':
-            sample_scheduler = FlowDPMSolverMultistepScheduler(num_train_timesteps=1000, shift=1, use_dynamic_shifting=False)
+        elif solver_name == "dpm++":
+            sample_scheduler = FlowDPMSolverMultistepScheduler(
+                num_train_timesteps=1000, shift=1, use_dynamic_shifting=False
+            )
             sampling_sigmas = get_sampling_sigmas(sampling_steps, shift=shift)
-            timesteps, _ = retrieve_timesteps(sample_scheduler, device=device, sigmas=sampling_sigmas)
-        elif solver_name == 'euler':
+            timesteps, _ = retrieve_timesteps(
+                sample_scheduler, device=device, sigmas=sampling_sigmas
+            )
+        elif solver_name == "euler":
             sample_scheduler = FlowMatchEulerDiscreteScheduler(shift=shift)
-            timesteps, _ = retrieve_timesteps(sample_scheduler, sampling_steps, device=device)
+            timesteps, _ = retrieve_timesteps(
+                sample_scheduler, sampling_steps, device=device
+            )
         else:
             raise NotImplementedError(f"Unsupported solver: {solver_name}")
-        
+
         return sample_scheduler, timesteps

@@ -29,6 +29,7 @@ See ``docs/ROADMAP_REVIEW.md`` §1.1 and §5 for the reasoning.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
 from dataclasses import dataclass, field, asdict
@@ -45,6 +46,13 @@ __all__ = [
     "load_dit_config",
     "load_observed_shape_fixture",
     "KNOWN_VARIANTS",
+    "UPSTREAM_MODEL_SPECS",
+    "UPSTREAM_PROVENANCE",
+    "OVI_CKPT_SUBDIR",
+    "FP8_CKPT_BASENAME",
+    "attach_upstream_contract",
+    "resolve_ovi_checkpoint",
+    "get_variant",
 ]
 
 
@@ -241,6 +249,16 @@ class OviModelSpec:
     observed_video: Optional[ObservedShape] = None
     observed_audio: Optional[ObservedShape] = None
 
+    # --- Temporal latent contract (upstream-shipped, provenance-tracked) ---
+    # Set ONLY via attach_upstream_contract(); get_variant() leaves these as
+    # None so the raw registry stays metadata-only. The temporal latent length
+    # is NOT the frame count: the Wan VAE applies 4x temporal compression, so
+    # 121 frames @ 24fps -> 31 video latent frames and 157 audio latent frames.
+    video_latent_length: Optional[int] = None
+    audio_latent_length: Optional[int] = None
+    latent_provenance: str = ""
+    audio_tag_style: str = "audio"  # 'audcap' (720x720_5s) or 'audio' (960)
+
     # ------------------------------------------------------------------
     @property
     def duration_seconds(self) -> float:
@@ -276,10 +294,15 @@ class OviModelSpec:
             missing.append("video_in_dim (load from configs/model/dit/video.json)")
         if self.audio_in_dim is None:
             missing.append("audio_in_dim (load from configs/model/dit/audio.json)")
+        if self.video_latent_length is None:
+            missing.append("video_latent_length (upstream checkpoint contract)")
+        if self.audio_latent_length is None:
+            missing.append("audio_latent_length (upstream checkpoint contract)")
         if missing:
             raise UnobservedContractError(
                 f"OviModelSpec '{self.name}' is not ready. Missing: {missing}. "
-                "Resolve via Gates M0-M3 in docs/ROADMAP_REVIEW.md."
+                "Resolve via Gates M0-M3 in docs/ROADMAP_REVIEW.md or attach the "
+                "upstream contract via attach_upstream_contract()."
             )
 
     def to_dict(self) -> dict:
@@ -291,21 +314,61 @@ class OviModelSpec:
 # ---------------------------------------------------------------------------
 
 #: Variants documented by the upstream Ovi release. Values are metadata only —
-#: latent dimensions are intentionally absent until observed.
+#: latent dimensions are intentionally absent until observed (see
+#: :data:`UPSTREAM_MODEL_SPECS` for the vendor-shipped temporal contract).
+#: ``checkpoint`` is the *basename* inside ``<ckpt_dir>/Ovi/`` — the upstream
+#: download layout (not a variant subdirectory).
 KNOWN_VARIANTS: Dict[str, Dict] = {
     "720x720_5s": dict(
-        checkpoint="Ovi/720x720_5s/model.safetensors",
+        checkpoint="model.safetensors",
         target_width=720, target_height=720, num_frames=121, fps=24,
     ),
     "960x960_5s": dict(
-        checkpoint="Ovi/960x960_5s/model.safetensors",
+        checkpoint="model_960x960.safetensors",
         target_width=960, target_height=960, num_frames=121, fps=24,
     ),
     "960x960_10s": dict(
-        checkpoint="Ovi/960x960_10s/model.safetensors",
+        checkpoint="model_960x960_10s.safetensors",
         target_width=960, target_height=960, num_frames=241, fps=24,
     ),
 }
+
+#: Upstream checkpoint subdirectory (relative to ``ckpt_dir``).
+OVI_CKPT_SUBDIR = "Ovi"
+
+#: FP8 checkpoint basename (upstream: only the 720x720_5s variant ships one).
+FP8_CKPT_BASENAME = "model_fp8_e4m3fn.safetensors"
+
+#: Temporal latent contract shipped with the trained upstream checkpoints
+#: (``ovi/ovi_fusion_engine.py::NAME_TO_MODEL_SPECS_MAP`` in
+#: character-ai/Ovi). These are NOT guesses: the numbers are part of the
+#: released checkpoint contract — the transformer RoPE/time embeddings and the
+#: audio VAE were trained at exactly these temporal lengths. They are injected
+#: into a spec only through :func:`attach_upstream_contract`, which records the
+#: provenance explicitly; :func:`get_variant` stays metadata-only.
+UPSTREAM_MODEL_SPECS: Dict[str, Dict] = {
+    "720x720_5s": dict(
+        video_latent_length=31,
+        audio_latent_length=157,
+        audio_tag_style="audcap",   # engine expects <AUDCAP>...<ENDAUDCAP>
+    ),
+    "960x960_5s": dict(
+        video_latent_length=31,
+        audio_latent_length=157,
+        audio_tag_style="audio",    # engine expects plain "Audio: ..."
+    ),
+    "960x960_10s": dict(
+        video_latent_length=61,
+        audio_latent_length=314,
+        audio_tag_style="audio",
+    ),
+}
+
+#: Provenance string recorded whenever the upstream latent contract is used.
+UPSTREAM_PROVENANCE = (
+    "upstream:character-ai/Ovi ovi_fusion_engine.NAME_TO_MODEL_SPECS_MAP "
+    "(temporal lengths shipped with the trained checkpoints)"
+)
 
 
 def get_variant(name: str) -> OviModelSpec:
@@ -315,6 +378,77 @@ def get_variant(name: str) -> OviModelSpec:
             f"Unknown Ovi variant '{name}'. Known: {sorted(KNOWN_VARIANTS)}"
         )
     return OviModelSpec(name=name, **KNOWN_VARIANTS[name])
+
+
+def attach_upstream_contract(
+    spec: OviModelSpec,
+    video_in_dim: int,
+    audio_in_dim: int,
+) -> OviModelSpec:
+    """Attach the vendor-shipped temporal latent contract to a variant spec.
+
+    The temporal lengths (31/157 for 5s, 61/314 for 10s) are part of the
+    upstream checkpoint contract, not assumptions — the released models were
+    trained at exactly these sequence lengths. This is the ONLY sanctioned way
+    to populate ``video_latent_length`` / ``audio_latent_length``: it records
+    the provenance on the spec so downstream gates can verify it.
+
+    Args:
+        spec: spec from :func:`get_variant` (metadata only).
+        video_in_dim: latent channel count from ``configs/model/dit/video.json``.
+        audio_in_dim: latent channel count from ``configs/model/dit/audio.json``.
+
+    Returns:
+        A new spec (frozen dataclass) with the contract attached.
+
+    Raises:
+        OviContractError: if the variant has no upstream entry, or the channel
+            counts are not positive integers.
+    """
+    entry = UPSTREAM_MODEL_SPECS.get(spec.name)
+    if entry is None:
+        raise OviContractError(
+            f"variant '{spec.name}' has no upstream latent contract"
+        )
+    if int(video_in_dim) <= 0 or int(audio_in_dim) <= 0:
+        raise OviContractError(
+            f"in_dims must be positive, got video={video_in_dim} audio={audio_in_dim}"
+        )
+    return dataclasses.replace(
+        spec,
+        video_latent_length=int(entry["video_latent_length"]),
+        audio_latent_length=int(entry["audio_latent_length"]),
+        audio_tag_style=str(entry["audio_tag_style"]),
+        video_in_dim=int(video_in_dim),
+        audio_in_dim=int(audio_in_dim),
+        latent_provenance=UPSTREAM_PROVENANCE,
+        observed_audio=ObservedShape(
+            latent_shape=(int(entry["audio_latent_length"]), 1, 1),
+            dtype="bfloat16",
+            channels=int(audio_in_dim),
+            source=UPSTREAM_PROVENANCE,
+        ),
+    )
+
+
+def resolve_ovi_checkpoint(ckpt_dir, variant: str) -> "pathlib.Path":
+    """Resolve ``<ckpt_dir>/Ovi/<basename>`` for a variant (upstream layout).
+
+    Raises:
+        OviContractError: unknown variant.
+        FileNotFoundError: checkpoint file missing — upstream treats this as a
+            hard error (the fusion checkpoint is REQUIRED, never optional).
+    """
+    spec = get_variant(variant)
+    path = pathlib.Path(ckpt_dir) / OVI_CKPT_SUBDIR / spec.checkpoint
+    if not path.exists():
+        raise FileNotFoundError(
+            f"REQUIRED Ovi fusion checkpoint not found at {path}. Download the "
+            f"upstream release for variant '{variant}' into "
+            f"{pathlib.Path(ckpt_dir) / OVI_CKPT_SUBDIR}/ (expected file: "
+            f"{spec.checkpoint})."
+        )
+    return path
 
 
 # ---------------------------------------------------------------------------

@@ -400,7 +400,9 @@ class TestSDXLSettings:
         req = ImageGenerationRequest(prompt="test scene")
         # Phase 7 schema uses model_name and use_refiner instead of num_inference_steps
         assert req.model_name == "sdxl-base"
-        assert req.use_refiner is True
+        # Refiner defaults OFF: it adds a second model load/VRAM cycle and is
+        # unnecessary for the primary image -> Ovi pipeline (audit item #20).
+        assert req.use_refiner is False
         assert req.width == 1024
         assert req.height == 1024
 

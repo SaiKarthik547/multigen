@@ -152,13 +152,17 @@ def _render_main(ctx, modality: str):
         cols = st.columns(3)
         options = {}
         if modality == "Image":
-            with cols[0]: options["use_refiner"] = st.checkbox("Use SDXL Refiner", value=True)
+            with cols[0]: options["use_refiner"] = st.checkbox("Use SDXL Refiner", value=False)
             with cols[1]: options["style"] = st.selectbox("Style", ["cinematic", "photorealistic", "anime", "watercolor", "sci-fi"])
             with cols[2]: options["seed"] = st.number_input("Seed", value=42)
         elif modality == "Video":
-            with cols[0]: options["num_frames"] = st.slider("Frames", 8, 48, 16)
-            with cols[1]: options["fps"] = st.slider("FPS", 4, 30, 8)
-            with cols[2]: options["interpolate"] = st.checkbox("RIFE Interpolation", value=True)
+            # Ovi is variant-driven: fps/duration come from the checkpoint.
+            # RIFE interpolation is retired from the cinematic path.
+            with cols[0]: options["variant"] = st.selectbox(
+                "Ovi Variant", ["720x720_5s", "960x960_5s", "960x960_10s"]
+            )
+            with cols[1]: options["sample_steps"] = st.slider("Sample Steps", 10, 60, 50)
+            with cols[2]: options["generate_keyframes"] = st.checkbox("SDXL Keyframe First", value=True)
         elif modality == "Audio":
             with cols[0]: options["audio_type"] = st.selectbox("Type", ["voice", "music", "ambient"])
             with cols[1]: options["duration_seconds"] = st.slider("Duration (s)", 1, 30, 5)

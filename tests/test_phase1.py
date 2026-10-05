@@ -344,34 +344,47 @@ def test_image_request_invalid_prompt():
 def test_video_request_defaults() -> None:
     from multigenai.llm.schema_validator import VideoGenerationRequest
     req = VideoGenerationRequest(prompt="test")
-    assert req.num_frames == 16
-    assert req.fps == 8
-    assert req.width == 1024
-    assert req.height == 576
+    # Ovi-era defaults: variant-driven 5s clip @ native 24 FPS, /32 frame size.
+    assert req.num_frames == 121
+    assert req.fps == 24
+    assert req.width == 704
+    assert req.height == 704
+    assert req.variant == "720x720_5s"
 
 
 def test_video_request_phase5_defaults_and_dimension_validation():
     from multigenai.llm.schema_validator import VideoGenerationRequest
     from pydantic import ValidationError
 
-    # Phase 6 defaults
+    # Ovi-era sampling defaults (upstream recommendation)
     req = VideoGenerationRequest(prompt="a knight at dawn", num_frames=4, width=640, height=640)
     assert req.temporal_strength == 0.25
     assert req.motion_hint == ""
-    assert req.num_inference_steps == 25
+    assert req.sample_steps == 50
     assert req.num_frames == 4
     assert req.width == 640
     assert req.height == 640
 
-    # Test %64 dimension validation
-    with pytest.raises(ValidationError, match="divisible by 64"):
+    # /32 dimension validation (Ovi snap granularity)
+    with pytest.raises(ValidationError, match="divisible by 32"):
         VideoGenerationRequest(prompt="test", width=639)
-    with pytest.raises(ValidationError, match="divisible by 64"):
+    with pytest.raises(ValidationError, match="divisible by 32"):
         VideoGenerationRequest(prompt="test", height=639)
     # Valid dimensions
     req_valid = VideoGenerationRequest(prompt="test", width=512, height=512)
     assert req_valid.width == 512
     assert req_valid.height == 512
+
+
+def test_video_request_variant_validation():
+    """The variant must be a known Ovi checkpoint variant."""
+    from multigenai.llm.schema_validator import VideoGenerationRequest
+    from pydantic import ValidationError
+
+    req = VideoGenerationRequest(prompt="test", variant="960x960_10s")
+    assert req.variant == "960x960_10s"
+    with pytest.raises(ValidationError):
+        VideoGenerationRequest(prompt="test", variant="does_not_exist")
 
 
 def test_video_request_temporal_strength_range():

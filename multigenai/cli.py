@@ -94,13 +94,16 @@ def video(
     prompt: str = typer.Option(..., "--prompt", "-p", help="Video scene description."),
     negative: Optional[str] = typer.Option(None, "--negative", "-n", help="Negative prompt — things to avoid."),
     style: Optional[str] = typer.Option(None, "--style", "-s", help="Style ID."),
-    frames: int = typer.Option(10, "--frames", "-f", help="Number of frames."),
-    fps: int = typer.Option(24, "--fps", help="Frames per second."),
-    width: int = typer.Option(512, "--width", "-W"),
-    height: int = typer.Option(512, "--height", "-H"),
+    variant: str = typer.Option("720x720_5s", "--variant", help="Ovi variant: 720x720_5s | 960x960_5s | 960x960_10s."),
+    dialogue: Optional[str] = typer.Option(None, "--dialogue", help="Speech for the first scene (Ovi <S>...</E>)."),
+    audio_description: Optional[str] = typer.Option(None, "--audio", help="Sound-design line (Ovi 'Audio: ...')."),
+    no_keyframe: bool = typer.Option(False, "--no-keyframe", help="Skip SDXL keyframe generation (pure T2V)."),
+    sample_steps: int = typer.Option(50, "--steps", help="Diffusion steps (upstream default 50)."),
+    width: int = typer.Option(720, "--width", "-W"),
+    height: int = typer.Option(720, "--height", "-H"),
     seed: Optional[int] = typer.Option(None, "--seed"),
 ):
-    """Generate a video from a text prompt."""
+    """Generate a synchronized audio-video clip with Ovi."""
     settings, ctx = _startup()
     from multigenai.llm.schema_validator import VideoGenerationRequest
     from multigenai.core.generation_manager import GenerationManager
@@ -109,11 +112,14 @@ def video(
         prompt=prompt,
         negative_prompt=negative or "",
         style_id=style,
-        num_frames=frames, fps=fps,
+        variant=variant,
+        sample_steps=sample_steps,
+        audio_description=audio_description,
+        generate_keyframes=not no_keyframe,
         width=width, height=height, seed=seed,
     )
-    console.print(Panel(f"[bold cyan]Generating video ({frames} frames)…[/bold cyan]\nPrompt: {prompt}", title="Video Engine"))
-    result = GenerationManager(ctx).generate_video(request)
+    console.print(Panel(f"[bold cyan]Generating Ovi AV ({variant}, {sample_steps} steps)…[/bold cyan]\nPrompt: {prompt}", title="Ovi Fusion Engine"))
+    result = GenerationManager(ctx).generate_video(request, dialogue_override=dialogue)
     if result.success:
         console.print(f"[bold green]✔ Done![/bold green] Saved to: {result.path}")
     else:

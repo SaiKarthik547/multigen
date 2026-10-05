@@ -56,6 +56,7 @@ class SceneDescriptor:
     motion_prompt: str = ""     # Phase 15: camera / motion description for AnimateDiff
     keyframe_path: str = ""     # Phase 15: path to the generated keyframe anchor image
     dialogue: Optional[str] = None # Phase 17: Character dialogue text for MMAudio
+    audio_description: Optional[str] = None  # Ovi: sound-design line ('Audio: ...')
 
     def __post_init__(self):
         if self.characters is None:
@@ -98,6 +99,14 @@ class _SceneItem(BaseModel):
     dialogue: Optional[str] = Field(
         default=None,
         description="Specific character dialogue text to be spoken in the scene"
+    )
+    audio_description: Optional[str] = Field(
+        default=None,
+        description=(
+            "Sound design for the scene (ambience, SFX, music), e.g. "
+            "'gentle rain on leaves, distant thunder'. Rendered as the Ovi "
+            "'Audio: ...' line."
+        )
     )
 
 
@@ -249,7 +258,8 @@ class ScenePlanner:
                 time_of_day=tod,
                 duration_hint=duration_hint,
                 notes=item.title,
-                dialogue=item.dialogue
+                dialogue=item.dialogue,
+                audio_description=item.audio_description,
             ))
 
         LOG.info(f"ScenePlanner (LLM): split script into {len(scenes)} scenes")

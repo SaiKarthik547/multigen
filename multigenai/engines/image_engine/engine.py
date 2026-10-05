@@ -380,3 +380,36 @@ class ImageEngine:
                 self.refiner = None
 
         return ImageResult(str(out_path), request.width, request.height, seed, True)
+
+    # ------------------------------------------------------------------
+    # Explicit teardown — required between engine phases
+    # ------------------------------------------------------------------
+
+    def release(self) -> None:
+        """Fully release the image pipeline and return VRAM to the allocator.
+
+        P0 lifecycle contract: ``ModelLifecycle.safe_unload(engine)`` only
+        deletes the caller's local reference — it can NOT reach
+        ``self.pipe`` / ``self.refiner``, which stay reachable and pin VRAM.
+        The orchestrator MUST call this after the keyframe phase so the Ovi
+        bundle can load into a clean VRAM pool (sequential image -> video
+        residency is the Kaggle free-tier memory strategy).
+        """
+        import torch
+
+        if self.pipe is not None:
+            ModelLifecycle.safe_unload(self.pipe)
+            self.pipe = None
+        if self.refiner is not None:
+            ModelLifecycle.safe_unload(self.refiner)
+            self.refiner = None
+        self._controlnet_enabled = False
+        self._ip_adapter_enabled = False
+
+        ModelLifecycle.enforce_cleanup("ImageEngine.release")
+        if torch.cuda.is_available():
+            reserved_gb = torch.cuda.memory_reserved() / 1024 ** 3
+            LOG.info(
+                "ImageEngine released — reserved VRAM after teardown: %.2f GB",
+                reserved_gb,
+            )
